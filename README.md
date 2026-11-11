@@ -94,3 +94,7 @@ python -m http.server 8123
 ```
 
 > 说明：仓库发布的是已确认的当前版本；「两行标题 / 播放卡吸顶」等提案仍在视觉评审阶段，未包含在此次部署中。
+
+## Git 自动部署
+
+本仓库已连接 Vercel 项目 `worldradio-v2`（生产分支 `master`）。向 `master` 推送提交会自动触发生产部署，域名 `radio666.xyz` / `www.radio666.xyz` 随之更新。

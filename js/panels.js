@@ -22,7 +22,9 @@ const ICON = {
   dice: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16" rx="4.2"/><circle cx="9" cy="9" r="1.2" fill="currentColor" stroke="none"/><circle cx="15" cy="15" r="1.2" fill="currentColor" stroke="none"/><circle cx="15" cy="9" r="1.2" fill="currentColor" stroke="none"/><circle cx="9" cy="15" r="1.2" fill="currentColor" stroke="none"/></svg>',
   wave: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4.6 10.4v3.2M9 7.6v8.8M13.4 5v14M17.8 8.6v6.8"/></svg>',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="10.8" cy="10.8" r="6.2"/><path d="M15.6 15.6l4.4 4.4"/></svg>',
-  panel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3.2" y="4.6" width="17.6" height="14.8" rx="3.2"/><path d="M9.4 4.6v14.8"/></svg>'
+  panel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3.2" y="4.6" width="17.6" height="14.8" rx="3.2"/><path d="M9.4 4.6v14.8"/></svg>',
+  grid: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7.5" height="7.5" rx="1.8"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="1.8"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="1.8"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.8"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/></svg>'
 };
 function svgIco(k) { const s = document.createElement('span'); s.innerHTML = ICON[k] || ''; return s.firstChild || document.createTextNode(''); }
 function fillIco(host, k) { host.innerHTML = ICON[k] || ''; return host; }
@@ -127,6 +129,8 @@ const $ = id => document.getElementById(id);
  let fav = load(KEY.fav, []), his = load(KEY.his, []), settings = load(KEY.set, {});
  const L = { stack: [{ v: 'root', title: '发现' }], limit: 120, filter: 'all', sort: load('ww.sort.v1', 'default') };
  const R = { stack: [{ v: 'now', title: '播放' }] };
+ /* WAVE DECK：列表密度视图 + 右栏折叠区块状态（视图偏好持久化） */
+ const V = { view: load('ww.view.v1', 'card'), folds: { alt: true, near: true, resume: true, hot: true, tools: true } };
 
  function load(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return v === null ? d : v; } catch (e) { return d; } }
  function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 隐私模式 */ } }
@@ -209,7 +213,16 @@ function cityShort(s) {
 
  /* ---------- 通用小组件 ---------- */
  function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
- function sec(text) { return el('div', 'psec', text); }
+ /* 分组标题：把「标题 · 数量」拆成标题 + 计数胶囊，层级更清晰 */
+function sec(text) {
+  const e = el('div', 'psec');
+  const m = String(text).match(/^(.*?)\s*·\s*([\d,]+)(\s*.*)$/);
+  if (m) {
+    e.appendChild(el('span', '', m[1]));
+    e.appendChild(el('span', 'cnt', m[2]));
+  } else e.textContent = text;
+  return e;
+}
 function empty(text, ico, acts) {
   const e = el('div', 'pempty');
   const lines = String(text).split('\n');
@@ -328,7 +341,7 @@ function logoBg(s) {
 }
 function row(o) {
   const s = o.station;
-  const b = el('button', o.on ? 'prow acard on' : 'prow acard');
+  const b = el('button', (o.on ? 'prow acard on' : 'prow acard') + (V.view === 'compact' ? ' compact' : ''));
   b.type = 'button';
   const grad = (s && s.cn) ? 'g-cn' : continentGrad(s);
   const logo = el('span', 'alogo ' + grad);
@@ -441,6 +454,7 @@ function renderL() {
   crumbs($('lCrumb'), L.stack, s => { L.stack = s; L.limit = 120; renderL(); });
   $('lBack').disabled = L.stack.length <= 1;
   mountFilters(top.v === 'root');
+  renderNowStrip();
   body.innerHTML = '';
   if (!stations.length) { body.appendChild(skeleton(7)); return; }
   const f = document.createDocumentFragment();
@@ -527,7 +541,6 @@ function sortBtn() {
   const b = el('button', 'sortbtn');
   b.type = 'button';
   fillIco(b, 'sort');
-  b.appendChild(el('span', '', cur[1]));
   b.title = '排序方式：' + cur[1] + '，点击切换';
   b.setAttribute('aria-label', '切换排序方式，当前' + cur[1]);
   b.addEventListener('click', () => {
@@ -549,16 +562,107 @@ function statLine() {
   const cnCount = stations.filter(s => s.cn).length;
   const countries = new Set(stations.map(countryOf)).size;
   const w = el('div', 'statline');
-  w.appendChild(el('b', '', fmt(stations.length)));
-  w.appendChild(el('span', '', '个电台'));
-  w.appendChild(el('i'));
-  w.appendChild(el('b', '', fmt(countries)));
-  w.appendChild(el('span', '', '地区'));
-  w.appendChild(el('i'));
-  w.appendChild(el('b', '', fmt(cnCount)));
-  w.appendChild(el('span', '', '中国'));
-  w.appendChild(sortBtn());
+  const st = el('div', 'stats');
+  st.appendChild(el('b', '', fmt(stations.length)));
+  st.appendChild(el('span', '', '台 ·'));
+  st.appendChild(el('b', '', fmt(countries)));
+  st.appendChild(el('span', '', '地区 ·'));
+  st.appendChild(el('b', '', fmt(cnCount)));
+  st.appendChild(el('span', '', '中国'));
+  w.appendChild(st);
+  const tools = el('div', 'tools');
+  tools.appendChild(sortBtn());
+  tools.appendChild(viewSwitch());
+  w.appendChild(tools);
   return w;
+}
+/* 卡片 / 紧凑视图切换：本地记忆，切换只重绘列表 */
+function viewSwitch() {
+  const w = el('div', 'viewsw');
+  [['card', 'grid', '卡片视图'], ['compact', 'list', '紧凑视图']].forEach(([k, ico, title]) => {
+    const b = el('button', V.view === k ? 'on' : '');
+    b.type = 'button';
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    b.setAttribute('aria-pressed', V.view === k ? 'true' : 'false');
+    fillIco(b, ico);
+    b.addEventListener('click', () => {
+      if (V.view === k) return;
+      V.view = k;
+      save('ww.view.v1', k);
+      renderL();
+      toast(k === 'card' ? '卡片视图' : '紧凑视图 · 一屏看更多');
+    });
+    w.appendChild(b);
+  });
+  return w;
+}
+/* 左栏常驻「正在收听」条：播放态在任何滚动位置都可见 */
+function renderNowStrip() {
+  const host = $('lNow');
+  if (!host) return;
+  host.innerHTML = '';
+  host.classList.toggle('idle', !current);
+  const disc = el('div', 'ldisc');
+  if (current) {
+    const lab = el('span', '', (current.name || '?').trim().charAt(0).toUpperCase());
+    const bg = logoBg(current);
+    if (bg) lab.style.background = bg;
+    disc.appendChild(lab);
+  } else fillIco(disc, 'wave');
+  host.appendChild(disc);
+  const body = el('div', 'lbody');
+  body.appendChild(el('span', 'lcap', current ? (mode === 'playing' ? '正在收听' : '已选择') : '待机'));
+  const nm = el('div', 'lname');
+  nm.appendChild(el('span', 'txt', current ? current.name : '选择一台开始收听'));
+  if (current && mode === 'playing') { const e = el('span'); e.appendChild(eq()); nm.appendChild(e); }
+  body.appendChild(nm);
+  host.appendChild(body);
+  const btn = el('button', 'lbtn');
+  btn.type = 'button';
+  if (current) {
+    btn.innerHTML = mode === 'playing' ? ICON.pause : ICON.play;
+    btn.title = mode === 'playing' ? '暂停' : '继续播放';
+    btn.addEventListener('click', () => window.WW_EARTH.togglePlay());
+  } else {
+    btn.innerHTML = ICON.dice;
+    btn.title = '随机听一台';
+    btn.addEventListener('click', randomPlay);
+  }
+  btn.setAttribute('aria-label', btn.title);
+  host.appendChild(btn);
+}
+/* 右栏可折叠区块 */
+function fold(key, title, count, fill) {
+  const box = el('div', 'wdsec' + (V.folds[key] ? ' open' : ''));
+  const head = el('button');
+  head.type = 'button';
+  head.appendChild(el('span', '', title));
+  head.appendChild(el('span', 'num', String(count)));
+  const ch = el('span', 'chev');
+  fillIco(ch, 'chev');
+  head.appendChild(ch);
+  head.addEventListener('click', () => {
+    V.folds[key] = !V.folds[key];
+    box.classList.toggle('open', !!V.folds[key]);
+  });
+  box.appendChild(head);
+  const body = el('div', 'wdbody');
+  fill(body);
+  box.appendChild(body);
+  return box;
+}
+/* 2×2 功能磁贴 */
+function tile(o) {
+  const b = el('button', 'wdtile');
+  b.type = 'button';
+  const ic = el('div', 'ti');
+  fillIco(ic, o.icon);
+  b.appendChild(ic);
+  b.appendChild(el('div', 'tn', o.name));
+  b.appendChild(el('div', 'tv' + (o.small ? ' sm' : ''), o.value));
+  b.addEventListener('click', o.click);
+  return b;
 }
 function renderRoot(f) {
   f.appendChild(statLine());
@@ -644,15 +748,168 @@ function renderStationRows(f, list, title, side) {
    case 'about': renderAbout(f); break;
   }
   body.appendChild(f);
+  eqVizUpdate();
   const st = $('rState');
   st.dataset.mode = mode;
   st.textContent = MODE_TXT[mode] || '就绪';
  }
+ /* ===== EQ 与睡眠定时器 =====
+    真实音频滤波需把 <audio> 接入 WebAudio，第三方电台流普遍不返回 CORS 头，
+    接入后会静音。因此默认使用「视觉律动」模式：三段增益始终控制律动形态并持久化；
+    只有明确开启、且流与页面同源时才建立 BiquadFilter 链，避免破坏播放。 */
+ const EQ_KEY = 'ww.eq.v1';
+ const EQ_PRESETS = {
+  flat:   { name: '平直', g: [0, 0, 0] },
+  vocal:  { name: '人声', g: [-3, 4, 2] },
+  bass:   { name: '低音', g: [7, -1, 1] },
+  bright: { name: '明亮', g: [-2, 1, 6] }
+ };
+ const EQ = Object.assign({ preset: 'flat', g: [0, 0, 0], real: false }, load(EQ_KEY, {}));
+ if (!Array.isArray(EQ.g) || EQ.g.length !== 3) EQ.g = [0, 0, 0];
+ const SLEEP = { deadline: 0, leftMin: 0, tick: null };
+ let eqAudio = null;
+ function saveEQ() { save(EQ_KEY, { preset: EQ.preset, g: EQ.g, real: EQ.real }); }
+ function eqVizUpdate(root) {
+  /* 允许传入尚未插入文档的局部容器，避免 querySelectorAll(document) 落空 */
+  (root || document).querySelectorAll('.eqviz i').forEach((b, i) => {
+   const band = Math.floor(i / 3), bump = (i % 3 === 1) ? 5 : 0;
+   const g = EQ.g[band] || 0;
+   b.style.setProperty('--h', (8 + (g + 12) / 24 * 16 + bump).toFixed(1) + 'px');
+   b.style.setProperty('--d', (i * 0.14).toFixed(2) + 's');
+  });
+ }
+ function eqApply() {
+  if (eqAudio) {
+   eqAudio.low.gain.value = EQ.g[0];
+   eqAudio.mid.gain.value = EQ.g[1];
+   eqAudio.high.gain.value = EQ.g[2];
+  }
+  eqVizUpdate();
+ }
+ function eqEnableReal(on) {
+  const E = window.WW_EARTH, a = E && E.audio;
+  if (!on) { EQ.real = false; saveEQ(); toast('已切回视觉律动模式'); return; }
+  if (!a || !a.src) { EQ.real = false; saveEQ(); renderR(); return; }
+  let same = false;
+  try { same = new URL(a.src, location.href).origin === location.origin; } catch (e) { }
+  if (!same) {
+   EQ.real = false; saveEQ();
+   toast('该电台流不开放跨域音频处理，真实 EQ 不可用');
+   renderR(); return;
+  }
+  try {
+   const C = window.AudioContext || window.webkitAudioContext;
+   const ctx = new C(), src = ctx.createMediaElementSource(a);
+   const low = ctx.createBiquadFilter(); low.type = 'lowshelf'; low.frequency.value = 200;
+   const mid = ctx.createBiquadFilter(); mid.type = 'peaking'; mid.frequency.value = 1000; mid.Q.value = .8;
+   const high = ctx.createBiquadFilter(); high.type = 'highshelf'; high.frequency.value = 4000;
+   src.connect(low); low.connect(mid); mid.connect(high); high.connect(ctx.destination);
+   eqAudio = { ctx, low, mid, high };
+   EQ.real = true; saveEQ(); eqApply(); toast('真实 EQ 已启用');
+  } catch (e) {
+   EQ.real = false; saveEQ(); toast('浏览器不支持音频处理'); renderR();
+  }
+ }
+ function fmtSleep(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+ }
+ function startSleep(min) {
+  SLEEP.deadline = Date.now() + min * 60000;
+  SLEEP.leftMin = min;
+  clearInterval(SLEEP.tick);
+  SLEEP.tick = setInterval(() => {
+   const left = SLEEP.deadline - Date.now();
+   if (left <= 0) {
+    clearInterval(SLEEP.tick); SLEEP.tick = null; SLEEP.deadline = 0;
+    const E = window.WW_EARTH;
+    if (E && E.audio && !E.audio.paused) E.togglePlay();
+    toast('睡眠定时已到 · 播放已暂停');
+    renderR(); return;
+   }
+   const b = document.querySelector('.sleepdisp b');
+   if (b) b.textContent = fmtSleep(left);
+  }, 1000);
+  toast('睡眠定时 ' + min + ' 分钟');
+  renderR();
+ }
+ function cancelSleep() {
+  clearInterval(SLEEP.tick); SLEEP.tick = null; SLEEP.deadline = 0;
+  toast('已取消睡眠定时'); renderR();
+ }
+ function soundSection() {
+  return fold('tools', '音效与定时', 'EQ', body => {
+   const panel = el('div', 'eqpanel');
+   const viz = el('div', 'eqviz');
+   for (let i = 0; i < 9; i++) viz.appendChild(el('i'));
+   panel.appendChild(viz);
+   ['低频', '中频', '高频'].forEach((lab, i) => {
+    const r = el('div', 'eqrow');
+    r.appendChild(el('label', '', lab));
+    const inp = el('input');
+    inp.type = 'range'; inp.min = '-12'; inp.max = '12'; inp.step = '1';
+    inp.value = String(EQ.g[i]);
+    inp.setAttribute('aria-label', lab + '增益');
+    const v = el('span', 'v', (EQ.g[i] > 0 ? '+' : '') + EQ.g[i] + ' dB');
+    inp.addEventListener('input', () => {
+     EQ.g[i] = parseInt(inp.value, 10);
+     EQ.preset = 'custom'; saveEQ();
+     v.textContent = (EQ.g[i] > 0 ? '+' : '') + EQ.g[i] + ' dB';
+     eqApply();
+     document.querySelectorAll('.eqpresets button').forEach(b => b.classList.remove('on'));
+    });
+    r.appendChild(inp); r.appendChild(v); panel.appendChild(r);
+   });
+   const pre = el('div', 'eqpresets');
+   Object.keys(EQ_PRESETS).forEach(k => {
+    const p = EQ_PRESETS[k];
+    const b = el('button', EQ.preset === k ? 'on' : '', p.name);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+     EQ.preset = k; EQ.g = p.g.slice(); saveEQ(); renderR(); toast('EQ 预设 · ' + p.name);
+    });
+    pre.appendChild(b);
+   });
+   panel.appendChild(pre);
+   const sw = el('label', 'eqswitch');
+   const cb = el('input'); cb.type = 'checkbox'; cb.checked = !!EQ.real;
+   cb.addEventListener('change', () => eqEnableReal(cb.checked));
+   sw.appendChild(cb);
+   sw.appendChild(el('span', '', '启用真实音频滤波（仅同源流可用）'));
+   panel.appendChild(sw);
+   panel.appendChild(el('div', 'eqnote',
+    '第三方电台流通常不提供 CORS，接入音频处理会导致静音；默认视觉律动模式，滑块与偏好始终生效。'));
+   const sl = el('div', 'sleep');
+   const row = el('div', 'sleeprow');
+   [15, 30, 45, 60].forEach(m => {
+    const b = el('button', (SLEEP.deadline && SLEEP.leftMin === m) ? 'on' : '', m + ' 分');
+    b.type = 'button';
+    b.addEventListener('click', () => startSleep(m));
+    row.appendChild(b);
+   });
+   sl.appendChild(row);
+   const disp = el('div', 'sleepdisp');
+   const remain = SLEEP.deadline ? Math.max(0, SLEEP.deadline - Date.now()) : 0;
+   disp.appendChild(el('span', '', SLEEP.deadline ? '剩余时间' : '睡眠定时'));
+   disp.appendChild(el('b', '', SLEEP.deadline ? fmtSleep(remain) : '--:--'));
+   if (SLEEP.deadline) {
+    const c = el('button', '', '取消');
+    c.type = 'button';
+    c.addEventListener('click', cancelSleep);
+    disp.appendChild(c);
+   }
+   sl.appendChild(disp);
+   panel.appendChild(sl);
+   body.appendChild(panel);
+   eqVizUpdate(panel);
+  });
+ }
+
  function renderNow(f) {
   const E = window.WW_EARTH;
-  if (!current) { renderIdle(f); renderFeatures(f); return; }
+  if (!current) { renderIdle(f); return; }
   /* ---------- 正在播放 hero ---------- */
-  const hero = el('div', 'nhero');
+  const hero = el('div', 'nhero nstage');
   const st = el('div', 'nstate');
   const chip = el('div', 'nchip');
   chip.dataset.mode = mode;
@@ -690,88 +947,87 @@ function renderStationRows(f, list, title, side) {
   main.appendChild(body);
   hero.appendChild(main);
 
-  /* ---------- 操作：主按钮 + 三个图标（图形替代字符，避免歧义） ---------- */
+  /* ---------- 主控制条：4 个圆形次级操作围绕 44px 播放主钮 ---------- */
   const acts = el('div', 'nactions');
-  const play = el('button', 'nbtn primary');
-  play.type = 'button';
-  play.innerHTML = (mode === 'playing' ? ICON.pause : ICON.play) + '<span>' + (mode === 'playing' ? '暂停' : '播放') + '</span>';
-  play.title = mode === 'playing' ? '暂停播放' : '继续播放';
-  play.addEventListener('click', () => E.togglePlay());
-  acts.appendChild(play);
-
-  const iconBtn = (kind, title, fn, aria) => {
-   const b = el('button', 'nbtn icon');
+  const iconBtn = (kind, title, fn, cls) => {
+   const b = el('button', 'nbtn icon' + (cls ? ' ' + cls : ''));
    b.type = 'button';
    b.innerHTML = ICON[kind];
    b.title = title;
-   b.setAttribute('aria-label', aria || title);
+   b.setAttribute('aria-label', title);
    b.addEventListener('click', fn);
    acts.appendChild(b);
    return b;
   };
-  const favB = iconBtn(isFav(current) ? 'starOn' : 'star', isFav(current) ? '取消收藏' : '收藏这台', () => {
+  iconBtn(isFav(current) ? 'starOn' : 'star', isFav(current) ? '取消收藏' : '收藏这台', () => {
    if (isFav(current)) { fav = fav.filter(x => !same(x, current)); toast('已取消收藏'); }
    else { fav = [compact(current), ...fav].slice(0, 200); toast('已收藏 · ' + current.name); }
    save(KEY.fav, fav);
    syncFav(current);
    renderR();
    if (L.stack[L.stack.length - 1].v === 'root') renderL();
-  }, (isFav(current) ? '取消收藏 ' : '收藏 ') + current.name);
-  if (isFav(current)) favB.classList.add('on');
-  iconBtn('loc', '在地球上定位', () => E.flyTo(current.lat, current.lon, 3.2), '在地球上定位 ' + current.name);
+  }, isFav(current) ? 'on' : '');
+  iconBtn('loc', '在地球上定位', () => E.flyTo(current.lat, current.lon, 3.2));
+  const play = el('button', 'nbtn primary');
+  play.type = 'button';
+  play.innerHTML = (mode === 'playing' ? ICON.pause : ICON.play) + '<span>' + (mode === 'playing' ? '暂停' : '播放') + '</span>';
+  play.title = mode === 'playing' ? '暂停播放' : '继续播放';
+  play.setAttribute('aria-label', play.title);
+  play.addEventListener('click', () => E.togglePlay());
+  acts.appendChild(play);
   iconBtn('link', '复制分享链接', () => {
    const url = location.href.split('#')[0] + '#@' + current.lat.toFixed(4) + ',' + current.lon.toFixed(4) + ',3.2';
    if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => toast('链接已复制到剪贴板')).catch(() => toast(url));
    else toast(url);
-  }, '复制这个电台的分享链接');
+  });
+  iconBtn('dice', '随机听一台', randomPlay);
   hero.appendChild(acts);
 
-  /* ---------- 备用流：同一坐标的其它电台，一键切换 ---------- */
+  f.appendChild(hero);
+  f.appendChild(soundSection());
+
+  /* ---------- 同址电台：可折叠（默认展开） ---------- */
   const AS = E.altState;
   if (AS && AS.list.length > 1) {
-   const wrap = el('div', 'nalts');
-   const head = el('div', 'nalts-h');
-   head.appendChild(el('span', '', '同址电台'));
-   head.appendChild(el('b', '', AS.list.length + ' 台'));
-   wrap.appendChild(head);
-   AS.list.forEach(item => {
-    const on = item.j === AS.idx;
-    const b = el('button', 'nalt' + (on ? ' on' : ''));
-    b.type = 'button';
-    b.appendChild(el('span', 'idx', String(item.j + 1)));
-    b.appendChild(el('span', 'nm', item.name));
-    if (on) b.appendChild(el('span', 'now', '当前'));
-    b.addEventListener('click', () => {
-     if (on) return;
-     E.playAlt(item.j);
-     toast('已切换 · ' + item.name);
-     setTimeout(renderR, 80);
+   f.appendChild(fold('alt', '同址电台', AS.list.length + ' 台', body => {
+    AS.list.forEach(item => {
+     const on = item.j === AS.idx;
+     const b = el('button', 'nalt' + (on ? ' on' : ''));
+     b.type = 'button';
+     b.appendChild(el('span', 'idx', String(item.j + 1)));
+     b.appendChild(el('span', 'nm', item.name));
+     if (on) b.appendChild(el('span', 'now', '当前'));
+     b.addEventListener('click', () => {
+      if (on) return;
+      E.playAlt(item.j);
+      toast('已切换 · ' + item.name);
+      setTimeout(renderR, 80);
+     });
+     body.appendChild(b);
     });
-    wrap.appendChild(b);
-   });
-   hero.appendChild(wrap);
+   }));
   }
-  f.appendChild(hero);
 
-  /* ---------- 附近电台 ---------- */
+  /* ---------- 附近电台：可折叠（默认收起，减少长滚动） ---------- */
   const near = stations.filter(s => !same(s, current))
-   .map(s => ({ s, d: distKm(current, s) })).sort((a, b) => a.d - b.d).slice(0, 8);
-  f.appendChild(sec('附近电台'));
-  near.forEach(x => f.appendChild(row({ name: x.s.name, station: x.s,
-   meta: cityShort(x.s), dist: x.d, click: () => play(x.s) })));
-  const all = el('button', 'pmore', '查看附近全部电台');
-  all.type = 'button';
-  all.addEventListener('click', () => {
-   const list = stations.filter(s => !same(s, current)).map(s => ({ s, d: distKm(current, s) }))
-    .sort((a, b) => a.d - b.d).slice(0, 200).map(x => x.s);
-   rPush('list', '附近', { items: list });
-  });
-  f.appendChild(all);
+   .map(s => ({ s, d: distKm(current, s) })).sort((a, b) => a.d - b.d).slice(0, 5);
+  f.appendChild(fold('near', '附近电台', near.length, body => {
+   near.forEach(x => body.appendChild(row({ name: x.s.name, station: x.s,
+    meta: cityShort(x.s), dist: x.d, click: () => play(x.s) })));
+   const all = el('button', 'pmore', '查看附近全部电台');
+   all.type = 'button';
+   all.addEventListener('click', () => {
+    const list = stations.filter(s => !same(s, current)).map(s => ({ s, d: distKm(current, s) }))
+     .sort((a, b) => a.d - b.d).slice(0, 200).map(x => x.s);
+    rPush('list', '附近', { items: list });
+   });
+   body.appendChild(all);
+  }));
   renderFeatures(f);
  }
  /* 未播放时的右栏：把空白变成可行动的入口 */
  function renderIdle(f) {
-  const hero = el('div', 'nhero idle');
+  const hero = el('div', 'nhero idle nstage');
   const st = el('div', 'nstate');
   const chip = el('div', 'nchip');
   chip.dataset.mode = 'idle';
@@ -807,33 +1063,37 @@ function renderStationRows(f, list, title, side) {
   acts.appendChild(b2);
   hero.appendChild(acts);
   f.appendChild(hero);
+  f.appendChild(soundSection());
 
-  /* 最近播放：横向快捷回到上次收听的台 */
+  /* 待机时把内容收进可折叠区块，避免一大片长滚动 */
   if (his.length) {
-   f.appendChild(sec('继续收听'));
-   his.slice(0, 3).forEach(s => f.appendChild(row({ name: s.name, station: s,
-    meta: cityMeta(s), click: () => play(s) })));
+   const recent = his.slice(0, 3);
+   f.appendChild(fold('resume', '继续收听', recent.length, body => {
+    recent.forEach(s => body.appendChild(row({ name: s.name, station: s,
+     meta: cityMeta(s), click: () => play(s) })));
+   }));
   }
-  /* 待机时给出真正可点的内容，而不是一大片空白 */
   const hot = filterStations('hot').filter(s => !his.some(x => same(x, s))).slice(0, 4);
   if (hot.length) {
-   f.appendChild(sec('热门电台'));
-   hot.forEach(s => f.appendChild(row({ name: s.name, station: s,
-    meta: cityShort(s), click: () => play(s) })));
+   f.appendChild(fold('hot', '热门电台', hot.length, body => {
+    hot.forEach(s => body.appendChild(row({ name: s.name, station: s,
+     meta: cityShort(s), click: () => play(s) })));
+   }));
   }
+  renderFeatures(f);
  }
  /* 功能入口：真实数值用等宽数字，空值显示 — */
  function renderFeatures(f) {
-  f.appendChild(sec('我的电台'));
-  f.appendChild(feat({ icon: 'fav', name: '我的收藏', meta: '星标保存的电台',
-   num: fav.length ? fmt(fav.length) : '—', click: () => rPush('list', '收藏', { items: fav }) }));
-  f.appendChild(feat({ icon: 'his', name: '最近播放', meta: '自动保留最近 40 条',
-   num: his.length ? fmt(his.length) : '—', click: () => rPush('list', '最近', { items: his }) }));
-  f.appendChild(sec('偏好'));
-  f.appendChild(feat({ icon: 'gear', name: '显示与画质', meta: '地名 / 点位 / 旋转 / 性能',
+  const g = el('div', 'wdtiles');
+  g.appendChild(tile({ icon: 'fav', name: '我的收藏',
+   value: fav.length ? fmt(fav.length) : '—', click: () => rPush('list', '收藏', { items: fav }) }));
+  g.appendChild(tile({ icon: 'his', name: '最近播放',
+   value: his.length ? fmt(his.length) : '—', click: () => rPush('list', '最近', { items: his }) }));
+  g.appendChild(tile({ icon: 'gear', name: '显示与画质', value: '画质 · 旋转 · 地名', small: true,
    click: () => rPush('settings', '设置') }));
-  f.appendChild(feat({ icon: 'info', name: '快捷键与关于', meta: '操作说明、数据来源与版本',
+  g.appendChild(tile({ icon: 'info', name: '快捷键与关于', value: '操作说明 · 版本', small: true,
    click: () => rPush('about', '关于') }));
+  f.appendChild(g);
  }
  function renderSettings(f) {
   const E = window.WW_EARTH;
@@ -898,7 +1158,9 @@ function renderStationRows(f, list, title, side) {
  function renderAbout(f) {
   f.appendChild(sec('操作'));
   [['拖拽 / 方向键', '旋转地球'], ['滚轮 / + -', '缩放（0 复位）'], ['点击绿点', '播放该点电台'],
-   ['/ 或 ⌕', '搜索电台'], ['‹ ›', '切换同址电台'], ['↑ ↓', '在列表中移动选择'], ['F', '影院模式（收起面板）'], ['Esc', '停止 / 关闭搜索']]
+   ['/ 或 ⌕', '搜索电台'], ['Space', '播放 / 暂停'], ['G', '收藏当前电台'], ['N', '随机听一台'],
+   ['↑ ↓', '在列表中移动选择'], ['F', '影院模式（收起面板）'], ['Esc', '停止 / 关闭搜索'],
+   ['卡片 / 紧凑', '左栏统计条右侧切换列表密度']]
    .forEach(([k, v]) => { const d = el('div', 'kv'); d.appendChild(el('span', '', k)); d.appendChild(el('b', '', v)); f.appendChild(d); });
   f.appendChild(sec('数据'));
   [['电台目录', 'Radio Browser 社区公开目录'], ['卫星影像', 'Esri World Imagery / Maxar'],
@@ -916,7 +1178,8 @@ function renderStationRows(f, list, title, side) {
    chip.dataset.mode = mode;
    chip.innerHTML = '';
    if (mode === 'playing') chip.appendChild(eq());
-   chip.appendChild(el('span', '', ({ playing: '正在播放', loading: '正在连接', error: '播放失败', paused: '已暂停' })[mode] || '已选择'));
+   chip.dataset.mode = current ? mode : 'idle';
+   chip.appendChild(el('span', '', !current ? '待机' : (({ playing: '正在播放', loading: '正在连接', error: '播放失败', paused: '已暂停' })[mode] || '已选择')));
   }
   const play = document.querySelector('.nhero .nbtn.primary');
   if (play) {
@@ -999,6 +1262,7 @@ function renderStationRows(f, list, title, side) {
    const t = $('rState');
    if (t) { t.dataset.mode = mode; t.textContent = MODE_TXT[mode] || '就绪'; }
    syncHeroMode();
+   renderNowStrip();
   });
   window.addEventListener('ww:catalog', () => {
    stations = window.WW_EARTH.stations;
@@ -1017,6 +1281,24 @@ function renderStationRows(f, list, title, side) {
    const open = document.body.dataset.left === '1' || document.body.dataset.right === '1';
    setPanel('left', !open, true);
    setPanel('right', !open, true);
+  });
+  /* WAVE DECK 快捷键：Space 播放/暂停、G 收藏当前台、N 随机一台 */
+  window.addEventListener('keydown', e => {
+   const tag = e.target && e.target.tagName;
+   if (tag === 'INPUT' || tag === 'TEXTAREA' || e.metaKey || e.ctrlKey || e.altKey) return;
+   const E = window.WW_EARTH;
+   if (e.code === 'Space') {
+    if (tag === 'BUTTON' || tag === 'SELECT') return;
+    e.preventDefault();
+    if (current && E) E.togglePlay(); else randomPlay();
+   } else if (e.key === 'g' || e.key === 'G') {
+    if (!current) return;
+    if (isFav(current)) { fav = fav.filter(x => !same(x, current)); toast('已取消收藏'); }
+    else { fav = [compact(current), ...fav].slice(0, 200); toast('已收藏 · ' + current.name); }
+    save(KEY.fav, fav); syncFav(current); renderR(); renderL();
+   } else if (e.key === 'n' || e.key === 'N') {
+    randomPlay();
+   }
   });
  }
  function valid(s) {

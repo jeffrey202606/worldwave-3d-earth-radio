@@ -1,0 +1,6 @@
+.vercel/
+node_modules/
+.DS_Store
+*.log
+_verify.cjs
+_shot.cjs

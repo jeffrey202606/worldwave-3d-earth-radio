@@ -456,7 +456,8 @@ function renderL() {
   mountFilters(top.v === 'root');
   renderNowStrip();
   body.innerHTML = '';
-  if (!stations.length) { body.appendChild(skeleton(7)); return; }
+  /* 快照到位前 stations 只有 6 个预置点；此时显示骨架屏，避免统计条短暂出现错误数字 */
+  if (stations.length < 20) { body.appendChild(skeleton(7)); return; }
   const f = document.createDocumentFragment();
   switch (top.v) {
    case 'root': renderRoot(f); break;

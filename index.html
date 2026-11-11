@@ -274,11 +274,59 @@
       background:linear-gradient(180deg,rgba(255,255,255,.085),rgba(255,255,255,.03));
       box-shadow:0 8px 22px rgba(0,0,0,.30),0 1px 0 rgba(255,255,255,.08) inset}
     .prow.acard:active{transform:translateY(0)}
+    /* 键盘焦点：用品牌绿描边并外扩 2px，不改变卡片尺寸，避免列表跳动 */
+    .prow.acard:focus-visible{outline:2px solid rgba(165,232,116,.75);outline-offset:2px;
+      border-color:rgba(165,232,116,.4)}
+    .prow.acard:focus-visible .alogo{box-shadow:0 0 0 1.5px rgba(165,232,116,.45),0 2px 7px rgba(0,0,0,.28)}
     .prow.acard.on{border-color:rgba(117,191,64,.30);
       background:linear-gradient(180deg,rgba(117,191,64,.105),rgba(117,191,64,.032))}
     .prow.acard.on::before{background:linear-gradient(180deg,#a5e874,#5aa32c);
       box-shadow:0 0 12px rgba(117,191,64,.5)}
     .prow.acard.on .alogo{box-shadow:0 0 0 1.5px rgba(117,191,64,.5),0 2px 8px rgba(0,0,0,.35),0 1px 0 rgba(255,255,255,.35) inset}
+    /* 点击后到出声之间：卡片立即进入「连接中」，底部一条不定进度条给出即时确认 */
+    .prow.acard.connecting{border-color:rgba(143,199,232,.34);
+      background:linear-gradient(180deg,rgba(143,199,232,.10),rgba(143,199,232,.028))}
+    .prow.acard.on.connecting{border-color:rgba(143,199,232,.4)}
+    .prow.acard.connecting::before{background:linear-gradient(180deg,#9fd8f2,#5e9fc4);
+      box-shadow:0 0 10px rgba(143,199,232,.45)}
+    .prow.acard .cprog{position:absolute;left:0;right:0;bottom:0;height:2px;overflow:hidden;
+      background:rgba(143,199,232,.14);transition:opacity .18s ease}
+    .prow.acard .cprog::after{content:'';position:absolute;top:0;bottom:0;left:-40%;width:40%;
+      background:linear-gradient(90deg,rgba(143,199,232,0),#9fd8f2,rgba(143,199,232,0));
+      animation:cslide 1.2s cubic-bezier(.4,0,.6,1) infinite}
+    @keyframes cslide{0%{left:-40%}100%{left:100%}}
+    /* 从地球点选后的落点提示：短暂描边呼吸，告诉用户「就是这张」 */
+    .prow.acard.flash{animation:cflash 1.6s ease-out 1}
+    @keyframes cflash{
+      0%{box-shadow:0 0 0 0 rgba(165,232,116,.55),0 1px 0 rgba(255,255,255,.055) inset}
+      55%{box-shadow:0 0 0 3px rgba(165,232,116,.26),0 1px 0 rgba(255,255,255,.055) inset}
+      100%{box-shadow:0 0 0 0 rgba(165,232,116,0),0 1px 0 rgba(255,255,255,.055) inset}}
+    @media (prefers-reduced-motion:reduce){
+      .prow.acard .cprog::after{animation:none;left:0;width:100%;opacity:.5}
+      .prow.acard.flash{animation:none}}
+    /* 触屏：没有 hover，定位按钮常驻，长按另有操作单 */
+    @media (hover:none){
+      .prow.acard .abtn.loc{width:22px;opacity:1;transform:none}
+    }
+    /* JS 判定为触屏设备时同样常驻（不依赖媒体查询的 hover 支持度） */
+    body.touch .prow.acard .abtn.loc{width:22px;opacity:1;transform:none}
+    body.touch .prow.acard .pfav,body.touch .prow.acard .abtn{width:26px;height:26px}
+    .ctxsheet{position:fixed;inset:0;z-index:70;background:rgba(3,9,16,.5);
+      -webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);animation:shIn .12s ease-out}
+    .ctxsheet-card{position:absolute;width:236px;padding:10px 8px 8px;border-radius:16px;
+      background:linear-gradient(180deg,rgba(16,30,45,.985),rgba(8,16,26,.995));
+      border:1px solid rgba(150,200,220,.16);box-shadow:0 18px 46px rgba(0,0,0,.55);
+      animation:shCard .16s cubic-bezier(.2,.8,.3,1)}
+    .ctxsheet-h{font-size:13px;font-weight:600;color:#eef8ff;padding:2px 8px 1px;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ctxsheet-m{font-size:10.5px;color:rgba(170,205,225,.6);padding:0 8px 8px;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .ctxsheet-b{display:block;width:100%;text-align:left;padding:10px 8px;border:0;border-radius:9px;
+      background:transparent;color:rgba(226,242,252,.9);font-size:12.5px;line-height:1.2;
+      cursor:pointer;transition:background .14s}
+    .ctxsheet-b:hover,.ctxsheet-b:focus-visible{background:rgba(255,255,255,.075);outline:none}
+    @keyframes shIn{from{opacity:0}to{opacity:1}}
+    @keyframes shCard{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
     .alogo{flex:none;width:36px;height:36px;border-radius:11px;display:inline-flex;align-items:center;justify-content:center;
       font-size:14.5px;font-weight:700;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4);
       border:1px solid rgba(255,255,255,.17);
@@ -394,7 +442,7 @@
     .pcard:hover .chev{color:rgba(200,230,245,.62)}
 
     /* ===== 正在播放 hero（重设计） ===== */
-    .nhero{position:relative;border-radius:17px;padding:12px 12px 11px;margin:2px 0 12px;overflow:hidden;
+    .nhero{position:relative;border-radius:17px;padding:12px 12px 11px;margin:2px 0 20px;overflow:hidden;
       border:1px solid rgba(255,255,255,.085);
       background:linear-gradient(163deg,rgba(26,50,40,.62),rgba(7,17,28,.78));
       box-shadow:0 12px 32px rgba(0,0,0,.34),0 1px 0 rgba(255,255,255,.06) inset}
@@ -560,11 +608,11 @@
     .nhero.nstage .nname{font-size:17px;text-align:center;margin-top:2px}
     .nhero.nstage .nmeta{justify-content:center}
     .nhero.nstage .nactions{justify-content:center;align-items:center;gap:10px;margin-top:16px}
-    .nhero.nstage .nbtn.primary{flex:none;width:44px;height:44px;border-radius:50%;padding:0;
-      box-shadow:0 4px 16px rgba(124,201,79,.25)}
+    .nhero.nstage .nbtn.primary{flex:none;width:56px;height:56px;border-radius:50%;padding:0;
+      box-shadow:0 6px 22px rgba(124,201,79,.34),0 0 0 6px rgba(124,201,79,.10)}
     .nhero.nstage .nbtn.primary span{display:none}
-    .nhero.nstage .nbtn.primary svg{width:18px;height:18px}
-    .nhero.nstage .nbtn.icon{width:34px;height:34px;border-radius:50%}
+    .nhero.nstage .nbtn.primary svg{width:20px;height:20px}
+    .nhero.nstage .nbtn.icon{width:36px;height:36px;border-radius:50%}
     .nhero.nstage .nbtn.icon svg{width:15px;height:15px}
     .nhero.nstage .nalts{text-align:left}
     /* 可折叠区块 */
@@ -638,6 +686,117 @@
       font-variant-numeric:tabular-nums;letter-spacing:.03em}
     .sleepdisp button{border:0;background:transparent;color:#ffb86b;font:9.5px inherit;cursor:pointer}
     @media (prefers-reduced-motion:reduce){.eqviz i{animation:none}}
+    /* 搜索命中高亮 */
+    .pname mark,.pmeta mark{background:rgba(124,201,79,.3);color:#eaffd6;border-radius:3px;padding:0 1px}
+    /* 快捷键浮层 */
+    .wdhelp{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;
+      background:rgba(3,8,14,.62);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);animation:hvIn .16s ease}
+    .wdhelp-card{width:min(340px,86vw);border-radius:16px;padding:16px 16px 12px;
+      border:1px solid rgba(150,200,220,.18);
+      background:linear-gradient(165deg,rgba(16,28,40,.985),rgba(7,14,22,.99));
+      box-shadow:0 24px 60px rgba(0,0,0,.55);color:var(--wd-ink)}
+    .wdhelp-t{font-size:12px;font-weight:600;letter-spacing:.06em;color:rgba(220,242,255,.9);margin-bottom:10px}
+    .wdhelp-row{display:flex;align-items:center;gap:10px;padding:5px 0;
+      border-bottom:1px solid rgba(255,255,255,.05);font-size:11px;color:var(--wd-ink2)}
+    .wdhelp-row:last-of-type{border-bottom:0}
+    .wdhelp-row kbd{flex:none;min-width:58px;text-align:center;font:10px ui-monospace,Consolas,monospace;
+      padding:3px 6px;border-radius:5px;background:rgba(255,255,255,.07);
+      border:1px solid rgba(255,255,255,.1);color:rgba(226,244,255,.9)}
+    .wdhelp-x{width:100%;margin-top:12px;padding:7px;border-radius:9px;
+      border:1px solid rgba(150,200,220,.18);background:rgba(255,255,255,.05);
+      color:rgba(220,240,252,.85);font:11px inherit;cursor:pointer}
+    .wdhelp-x:hover{background:rgba(255,255,255,.09)}
+    /* 统计条字号与折叠标题基线微调 */
+    .statline{font-size:10px}
+    .statline b{font-size:10.5px}
+    .wdsec>button{line-height:1.35}
+    .wdsec>button .num{position:relative;top:.5px}
+    /* 紧凑视图播放态：站名前加状态点，避免只剩细条 */
+    /* 播放态只保留均衡器一个指示，避免和左侧绿条、圆点重复 */
+    .prow.acard.compact.on .pname::before{content:'';display:inline-block;width:4px;height:4px;
+      border-radius:50%;background:var(--wd-green);margin-right:4px;vertical-align:1px}
+
+
+    /* ===== 卡片 v2：可展开详情（上下级信息同卡承载） ===== */
+    .prow.acard{display:block;padding:0;min-height:0;gap:0}
+    .prow.acard .ctop{display:flex;align-items:center;gap:9px;padding:8px 9px;min-height:56px;
+      box-sizing:border-box}
+    .prow.acard .acts{position:static;transform:none;display:flex;align-items:center;gap:2px;flex:none}
+    .prow.acard .pmain{padding-right:0}
+    .prow.acard .alogo{width:36px;height:36px;border-radius:8px;font-size:15px;font-weight:700;
+      background:hsl(var(--h,210) 45% 32%);color:hsl(var(--h,210) 30% 92%);
+      border:1px solid rgba(255,255,255,.13);letter-spacing:-.02em;
+      box-shadow:0 2px 6px rgba(0,0,0,.28),0 1px 0 rgba(255,255,255,.18) inset;
+      text-shadow:none}
+    .prow.acard .alogo.two{font-size:12px;letter-spacing:-.03em}
+    .prow.acard .cexp{flex:none;width:18px;height:18px;padding:0;border:0;border-radius:6px;
+      background:transparent;color:rgba(186,216,232,.42);cursor:pointer;
+      display:inline-flex;align-items:center;justify-content:center;
+      transition:color .15s,background .15s,transform .18s cubic-bezier(.2,.8,.3,1)}
+    .prow.acard .cexp svg{width:14px;height:14px;display:block}
+    .prow.acard:hover .cexp,.prow.acard:focus-within .cexp{color:rgba(214,238,250,.86);background:rgba(255,255,255,.07)}
+    .prow.acard.open .cexp{transform:rotate(180deg);color:rgba(214,238,250,.9)}
+    /* 流派标签 */
+    .prow.acard .gtag{flex:none;font-size:9px;line-height:1.35;padding:1px 5px;border-radius:4px;
+      letter-spacing:.02em;background:rgba(255,255,255,.06);color:rgba(204,224,238,.82);
+      border:1px solid rgba(255,255,255,.07)}
+    .prow.acard .gtag.g-news{background:rgba(240,158,110,.15);color:#f2bb9c;border-color:rgba(240,158,110,.22)}
+    .prow.acard .gtag.g-jazz{background:rgba(178,150,238,.15);color:#cbbcf5;border-color:rgba(178,150,238,.22)}
+    .prow.acard .gtag.g-classic{background:rgba(232,200,120,.15);color:#ecda9f;border-color:rgba(232,200,120,.22)}
+    .prow.acard .gtag.g-rock{background:rgba(236,122,122,.15);color:#f0a9a9;border-color:rgba(236,122,122,.22)}
+    .prow.acard .gtag.g-dance{background:rgba(110,208,214,.15);color:#9fe0e4;border-color:rgba(110,208,214,.22)}
+    .prow.acard .gtag.g-sport{background:rgba(126,206,140,.15);color:#a8e0b4;border-color:rgba(126,206,140,.22)}
+    .prow.acard .gtag.g-talk{background:rgba(168,186,204,.13);color:#c3d3e0;border-color:rgba(168,186,204,.2)}
+    .prow.acard .gtag.g-pop{background:rgba(238,140,196,.15);color:#f2b0d3;border-color:rgba(238,140,196,.22)}
+    /* 抽屉：显式高度过渡（JS 写入测量值），比 max-height/grid 更稳 */
+    .prow.acard .cdrawer{display:block;height:0;overflow:hidden;
+      transition:height .24s cubic-bezier(.2,.8,.3,1)}
+    .prow.acard .cbody{display:flex;flex-direction:column;
+      gap:9px;padding:0 9px;opacity:0;transition:opacity .16s ease}
+    .prow.acard.open .cbody{opacity:1;padding-bottom:9px}
+    .prow.acard .cacts{display:flex;gap:6px}
+    .prow.acard .cact{flex:1;height:32px;display:inline-flex;align-items:center;justify-content:center;gap:4px;
+      border:1px solid rgba(255,255,255,.09);background:rgba(255,255,255,.05);border-radius:8px;
+      color:rgba(226,242,252,.88);font-size:10.5px;cursor:pointer;padding:0 4px;
+      transition:background .15s,border-color .15s,color .15s}
+    .prow.acard .cact svg{width:15px;height:15px;flex:none}
+    .prow.acard .cact:hover{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.16)}
+    .prow.acard .cact.primary{background:rgba(124,201,79,.16);border-color:rgba(124,201,79,.34);color:#d6f2c2}
+    .prow.acard .cact.primary:hover{background:rgba(124,201,79,.24)}
+    .prow.acard .cinfo{display:flex;flex-direction:column;gap:1px;font-size:10.5px;line-height:16px;opacity:.6}
+    .prow.acard .crow{display:flex;align-items:baseline;justify-content:space-between;gap:10px}
+    .prow.acard .crow b{font-weight:500;color:rgba(178,206,224,.8);flex:none}
+    .prow.acard .crow i{font-style:normal;color:rgba(212,234,246,.92);text-align:right;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .prow.acard .crow i.clink{color:#9fd8f2;cursor:pointer;text-decoration:underline;
+      text-decoration-style:dotted;text-underline-offset:2px}
+    .prow.acard .cmore{align-self:flex-start;display:inline-flex;align-items:center;gap:4px;
+      height:26px;padding:0 8px 0 9px;border-radius:7px;border:1px solid rgba(255,255,255,.08);
+      background:transparent;color:rgba(200,226,242,.82);font-size:10.5px;cursor:pointer;
+      transition:background .15s,color .15s}
+    .prow.acard .cmore svg{width:12px;height:12px}
+    .prow.acard .cmore:hover{background:rgba(255,255,255,.07);color:#eaf8ff}
+    /* 紧凑视图维持单行 */
+    .prow.acard.compact{display:block;padding:0}
+    .prow.acard.compact .ctop{padding:5px 8px;min-height:36px;gap:8px;box-sizing:border-box}
+    .prow.acard.compact .alogo{width:24px;height:24px;border-radius:7px;font-size:10px}
+    .prow.acard.compact .alogo.two{font-size:9px}
+    @media (prefers-reduced-motion:reduce){
+      .prow.acard .cdrawer{transition:none}
+      .prow.acard .cbody{transition:none}
+      .prow.acard .cexp{transition:none}
+    }
+
+    /* ===== 分类标签第二组（类型） ===== */
+    .chips .chipdiv{flex:0 0 100%;display:flex;align-items:center;gap:4px;flex-wrap:wrap;padding:3px 0 0}
+    .chips .chiplabel{flex:none;font-size:9px;letter-spacing:.1em;color:rgba(150,190,210,.45);padding-right:3px}
+    .chips .chip.gchip{font-size:9.5px;padding:4px 8px;background:rgba(255,255,255,.022)}
+    .chips .chip.gchip.on{background:rgba(124,201,79,.16);border-color:rgba(124,201,79,.4);color:#dcf3cc}
+    /* 体检判定不可用的流：压暗但仍可点击（可能只是当时不可达） */
+    /* 体检判定上次没连上：只压暗徽标与站名，具体原因放在 title 里，避免挤占文字 */
+    .prow.acard.dead .pname{opacity:.7}
+    .prow.acard.dead .alogo{filter:grayscale(.7);opacity:.7}
+
   </style>
 </head>
 <body>
@@ -676,8 +835,8 @@
     <div class="psearch">
       <input id="lSearch" type="search" placeholder="搜索电台 / 城市 / 国家" autocomplete="off" aria-label="搜索电台目录">
     </div>
-    <div class="pfilters" id="lFilter"></div>
-    <div class="pbody" id="lBody"></div>
+    <div class="pfilters" id="lFilter" role="group" aria-label="电台分类"></div>
+    <div class="pbody" id="lBody" role="group" aria-label="电台列表，可用上下方向键移动"></div>
     <div class="pfoot" id="lFoot"><span>公开电台目录</span><span id="lCount">—</span></div>
   </aside>
   <button id="leftTab" class="ptab" type="button" aria-label="展开电台目录">电台目录</button>
@@ -688,7 +847,7 @@
       <div class="pcrumb" id="rCrumb"></div>
       <button class="ico" id="rCollapse" type="button" title="收起右栏" aria-label="收起右栏">×</button>
     </div>
-    <div class="pbody" id="rBody"></div>
+    <div class="pbody" id="rBody" role="group" aria-label="正在播放与相关电台"></div>
     <div class="pfoot" id="rFoot"><span>WORLDWAVE</span><span id="rState">就绪</span></div>
   </aside>
   <button id="rightTab" class="ptab" type="button" aria-label="展开放置与设置">播放 · 设置</button>

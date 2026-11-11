@@ -127,10 +127,15 @@ const $ = id => document.getElementById(id);
  const MODE_TXT = { idle: '就绪', loading: '连接中', playing: '播放中', paused: '已暂停', error: '播放失败' };
  let stations = [], idx = null, current = null, mode = 'idle';
  let fav = load(KEY.fav, []), his = load(KEY.his, []), settings = load(KEY.set, {});
- const L = { stack: [{ v: 'root', title: '发现' }], limit: 120, filter: 'all', sort: load('ww.sort.v1', 'default') };
+ const L = { stack: [{ v: 'root', title: '发现' }], limit: 48, filter: 'all', sort: load('ww.sort.v1', 'default') };
  const R = { stack: [{ v: 'now', title: '播放' }] };
  /* WAVE DECK：列表密度视图 + 右栏折叠区块状态（视图偏好持久化） */
- const V = { view: load('ww.view.v1', 'card'), folds: { alt: true, near: true, resume: true, hot: true, tools: true } };
+ const V = { view: load('ww.view.v1', 'card'), folds: { alt: true, near: true, resume: true, hot: true, tools: false } };
+ let HL = '';
+ /* 已展开详情的卡片（按 坐标+台名 记忆，重绘后保持展开） */
+ const EXPAND = new Set();
+ /* 正在连接中的电台：卡片据此显示「连接中」进度条，出声或失败后清除 */
+ let PENDING = null;
 
  function load(k, d) { try { const v = JSON.parse(localStorage.getItem(k)); return v === null ? d : v; } catch (e) { return d; } }
  function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 隐私模式 */ } }
@@ -151,6 +156,21 @@ const $ = id => document.getElementById(id);
   return p.length > 1 ? p.slice(0, -1).join(',').trim() : (p[0] || '其他');
  }
 /* 列表展示用：城市 + 规范地区名，避免出现原始超长 / 不规范地名 */
+/* 搜索命中高亮：只包裹匹配片段，不改字重与排版 */
+function hl(text) {
+ const s = String(text == null ? '' : text);
+ if (!HL) return document.createTextNode(s);
+ const lower = s.toLowerCase(), q = HL;
+ let i = 0, idx;
+ const out = document.createDocumentFragment();
+ while ((idx = lower.indexOf(q, i)) >= 0) {
+  if (idx > i) out.appendChild(document.createTextNode(s.slice(i, idx)));
+  out.appendChild(el('mark', '', s.slice(idx, idx + q.length)));
+  i = idx + q.length;
+ }
+ if (i < s.length) out.appendChild(document.createTextNode(s.slice(i)));
+ return out;
+}
 function cityMeta(s) {
   const p = (s.city || '').trim().split(',');
   if (p.length > 1) {
@@ -291,6 +311,7 @@ function favBtn(s) {
    else { fav = [compact(s), ...fav].slice(0, 200); toast('已收藏 · ' + s.name); }
    save(KEY.fav, fav);
    syncFav(s);
+   syncCounts();
    /* 根视图的收藏计数、右栏 hero 的星标状态需要跟随更新 */
    if (L.stack[L.stack.length - 1].v === 'root') renderL();
    if (current && same(current, s) && R.stack[R.stack.length - 1].v === 'now') renderR();
@@ -339,41 +360,363 @@ function logoBg(s) {
   const l2 = 39 + ((h >> 16) % 7);
   return 'linear-gradient(145deg,hsl(' + hue + ' ' + sat + '% ' + l1 + '%),hsl(' + hue + ' ' + sat + '% ' + l2 + '%))';
 }
+/* 悬停即预连接流域：把 DNS / TLS 握手提前到点击之前，点下去更快出流 */
+const PRE_HOSTS = new Set();
+function preconnect(url) {
+ try {
+  const origin = new URL(url).origin;
+  if (PRE_HOSTS.has(origin)) return;
+  PRE_HOSTS.add(origin);
+  const a = document.createElement('link');
+  a.rel = 'preconnect'; a.href = origin; a.crossOrigin = 'anonymous';
+  document.head.appendChild(a);
+  const b = document.createElement('link');
+  b.rel = 'dns-prefetch'; b.href = origin;
+  document.head.appendChild(b);
+ } catch (e) {}
+}
+/* ---------- 触屏长按操作单 ---------- */
+let pressTimer = null, pressStart = null, sheetEl = null;
+function closeSheet() { if (sheetEl) { sheetEl.remove(); sheetEl = null; } }
+function openSheet(s, x, y) {
+  closeSheet();
+  const wrap = el('div', 'ctxsheet');
+  wrap.addEventListener('click', ev => { if (ev.target === wrap) closeSheet(); });
+  const card = el('div', 'ctxsheet-card');
+  card.appendChild(el('div', 'ctxsheet-h', s.name));
+  card.appendChild(el('div', 'ctxsheet-m', cityShort(s) || '—'));
+  const mk = label => {
+   const b = el('button', 'ctxsheet-b', label);
+   b.type = 'button';
+   card.appendChild(b);
+   return b;
+  };
+  mk('只定位，不播放').addEventListener('click', () => {
+   closeSheet();
+   window.WW_EARTH.flyTo(s.lat, s.lon, 3.15);
+   toast('已定位 · ' + s.name);
+  });
+  mk(isFav(s) ? '取消收藏' : '收藏电台').addEventListener('click', () => {
+   closeSheet();
+   if (isFav(s)) { fav = fav.filter(x => !same(x, s)); toast('已取消收藏'); }
+   else { fav = [compact(s), ...fav].slice(0, 200); toast('已收藏 · ' + s.name); }
+   save(KEY.fav, fav);
+   syncFav(s);
+   syncCounts();
+   if (L.stack[L.stack.length - 1].v === 'root') renderL();
+   if (current && same(current, s)) renderR();
+  });
+  mk('复制分享链接').addEventListener('click', () => {
+   closeSheet();
+   const url = location.href.split('#')[0] + '#@' + s.lat.toFixed(4) + ',' + s.lon.toFixed(4) + ',3.2';
+   if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => toast('链接已复制')).catch(() => toast(url));
+   else toast(url);
+  });
+  wrap.appendChild(card);
+  document.body.appendChild(wrap);
+  sheetEl = wrap;
+  /* 以触点为锚点，夹取在视口内 */
+  const r = card.getBoundingClientRect();
+  const w = r.width || 236, h = r.height || 170;
+  const left = Math.max(10, Math.min(window.innerWidth - w - 10, (x || window.innerWidth / 2) - w / 2));
+  const top = Math.max(10, Math.min(window.innerHeight - h - 10, (y || window.innerHeight / 2) - h / 2));
+  card.style.left = left + 'px';
+  card.style.top = top + 'px';
+}
+/* ---------- 卡片内容派生：monogram / 色相 / 流派标签 ---------- */
+function hashOf(str) {
+ let h = 0;
+ const t = String(str || '');
+ for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) >>> 0;
+ return h;
+}
+/* 圆角矩形徽标：1–2 个字母。双字母只在「多词台名」时启用，36px 下比正圆更耐看 */
+function monogramOf(name) {
+ const parts = String(name || '?').trim().split(/[\s\-–—|·/:,.]+/).filter(Boolean);
+ const a = (parts[0] || '?').charAt(0).toUpperCase();
+ if (parts.length > 1) {
+  const b = (parts[1] || '').charAt(0).toUpperCase();
+  if (b && b !== a) return a + b;
+ }
+ const alt = (parts[0] || '').charAt(1);
+ return (alt && alt.toUpperCase() !== a) ? a + alt.toUpperCase() : a;
+}
+/* 色相按台名哈希落在 6 个 60° 区间：同一台永远同色，相邻卡片又不至于一片同色 */
+function logoHue(name) { return (hashOf(name) % 6) * 60 + 14; }
+const GENRES = [
+ [/jazz|swing|bebop/i, '爵士', 'g-jazz'],
+ [/classical|baroque|opera|symphon|philharm|orchestra|chamber/i, '古典', 'g-classic'],
+ [/news|noticias|informaci|aktuell|新闻/i, '新闻', 'g-news'],
+ [/sport|deport|sporting/i, '体育', 'g-sport'],
+ [/rock|metal|punk|grunge/i, '摇滚', 'g-rock'],
+ [/dance|techno|house|trance|electro|edm/i, '电子', 'g-dance'],
+ [/country|bluegrass|americana/i, '乡村', 'g-country'],
+ [/talk|spoken|interview|debate/i, '谈话', 'g-talk'],
+ [/gospel|christian|relig|catholic|islam|buddh/i, '宗教', 'g-relig'],
+ [/kids|child|family/i, '儿童', 'g-kids'],
+ [/oldie|retro|golden|nostalg/i, '怀旧', 'g-old'],
+ [/pop|hits|top ?40|chart/i, '流行', 'g-pop']
+];
+/* 只认明确命中的流派，不做「FM/Radio → 音乐」的兜底，避免整屏都是同一个标签 */
+function genresOf(name) {
+ const n = String(name || '');
+ const out = [];
+ for (let i = 0; i < GENRES.length && out.length < 2; i++) {
+  if (GENRES[i][0].test(n) && !out.some(g => g[0] === GENRES[i][1])) {
+   out.push([GENRES[i][1], GENRES[i][2]]);
+  }
+ }
+ return out;
+}
+function coordKeyOf(s) { return Math.round(s.lat * 50) + ':' + Math.round(s.lon * 50); }
+function sameCoordList(s) {
+ const k = coordKeyOf(s);
+ const list = stations.filter(x => coordKeyOf(x) === k);
+ return list.length ? list : [s];
+}
+function sameCityList(s) {
+ const city = String(s.city || '').split(',')[0].trim().toLowerCase();
+ if (!city) return [];
+ return stations.filter(x => String(x.city || '').split(',')[0].trim().toLowerCase() === city).slice(0, 200);
+}
+
+/* 抽屉开合：写入测量高度，过渡结束后回落 auto，内容变化也不会被裁 */
+function openDrawer(b) {
+ const d = b && b.querySelector('.cdrawer');
+ if (!d) return;
+ if (b._buildDrawer) b._buildDrawer();
+ d.style.height = d.scrollHeight + 'px';
+ d._auto = false;
+}
+function closeDrawer(b) {
+ const d = b && b.querySelector('.cdrawer');
+ if (!d) return;
+ d.style.height = d.scrollHeight + 'px';
+ requestAnimationFrame(() => { d.style.height = '0px'; });
+}
+/* 重绘后恢复已展开卡片的抽屉高度（渲染时元素还没进文档，量不到 scrollHeight） */
+function syncDrawers() {
+ const body = $('lBody');
+ if (!body) return;
+ [].forEach.call(body.querySelectorAll('.prow.acard.open'), card => openDrawer(card));
+}
 function row(o) {
   const s = o.station;
-  const b = el('button', (o.on ? 'prow acard on' : 'prow acard') + (V.view === 'compact' ? ' compact' : ''));
-  b.type = 'button';
-  const grad = (s && s.cn) ? 'g-cn' : continentGrad(s);
-  const logo = el('span', 'alogo ' + grad);
-  logo.textContent = (o.name || '?').trim().charAt(0).toUpperCase();
-  const lbg = logoBg(s);
-  if (lbg) logo.style.background = lbg;
-  b.appendChild(logo);
-  /* 第一行：站名（主信息）+ 播放中均衡器；第二行：距离 / 地点 / 分级或备用流数 */
+  /* 连接中优先于播放态：切换电台时上一台还是 playing，因此不能按 mode 判断，
+     只认「这次点击的目标」；ww:mode 收到结果后清空 PENDING。 */
+  const pending = !!(s && PENDING && same(s, PENDING));
+  const compact = V.view === 'compact';
+  const key = s ? coordKeyOf(s) + '|' + (s.name || '') : '';
+  const open = !!(s && !compact && EXPAND.has(key));
+  const cls = ['prow', 'acard', o.on ? 'on' : '', compact ? 'compact' : '',
+   pending ? 'connecting' : '', open ? 'open' : ''].filter(Boolean).join(' ');
+  const b = el('div', cls);
+  if (s) b._s = s;
+  b.setAttribute('role', 'button');
+  b.tabIndex = 0;
+  if (s) {
+   b.setAttribute('aria-pressed', o.on ? 'true' : 'false');
+   b.setAttribute('aria-label', [o.name, o.meta, (s.cn && s.tier) ? s.tier : '',
+    (s.alts && s.alts.length) ? ('同址 ' + (s.alts.length + 1) + ' 台') : '',
+    o.on ? '正在播放' : ''].filter(Boolean).join('，'));
+  }
+
+  /* 第一层：徽标 + 台名 + 元信息 + 收藏 + 展开按钮 */
+  const top = el('span', 'ctop');
+  const mono = monogramOf(o.name);
+  const logo = el('span', 'alogo' + (mono.length > 1 ? ' two' : ''));
+  logo.style.setProperty('--h', logoHue(o.name));
+  logo.textContent = mono;
+  top.appendChild(logo);
+
   const main = el('span', 'pmain');
   const nameRow = el('span', 'pnamerow');
-  nameRow.appendChild(el('span', 'pname', o.name));
+  const nmEl = el('span', 'pname');
+  nmEl.appendChild(hl(o.name));
+  nameRow.appendChild(nmEl);
   if (o.on) { const e = el('span', 'pname-eq'); e.appendChild(eq()); nameRow.appendChild(e); }
   main.appendChild(nameRow);
+
   const meta = el('span', 'pmeta');
+  genresOf(o.name).forEach(g => meta.appendChild(el('span', 'gtag ' + g[1], g[0])));
   if (o.dist != null) meta.appendChild(el('span', 'dchip', kmText(o.dist)));
-  meta.appendChild(el('span', 'mtxt', o.meta || '—'));
+  const mtEl = el('span', 'mtxt');
+  mtEl.appendChild(hl(o.meta || '—'));
+  meta.appendChild(mtEl);
   if (s && s.cn && s.tier) meta.appendChild(el('span', 'apill ' + tierClass(s.tier), s.tier));
-  else if (s && s.alts && s.alts.length) {
-   const t = el('span', 'malt', (s.alts.length + 1) + ' 台');
-   t.title = '同一坐标共 ' + (s.alts.length + 1) + ' 台电台';
-   meta.appendChild(t);
-  }
   main.appendChild(meta);
-  b.appendChild(main);
+  top.appendChild(main);
+
   const acts = el('span', 'acts');
-  if (s) { acts.appendChild(locBtn(s)); acts.appendChild(favBtn(s)); }
-  b.appendChild(acts);
-  if (o.click) b.addEventListener('click', o.click);
-  if (o.name) b.title = (o.meta ? (o.name + ' · ' + o.meta) : o.name) + (o.station && o.station.alts && o.station.alts.length ? ' · ' + o.station.alts.length + ' 路备用流' : '');
+  if (s) acts.appendChild(favBtn(s));
+  top.appendChild(acts);
+
+  let chev = null;
+  if (s && !compact) {
+   chev = el('button', 'cexp');
+   chev.type = 'button';
+   chev.setAttribute('aria-expanded', open ? 'true' : 'false');
+   chev.setAttribute('aria-label', open ? '收起详情' : '展开详情');
+   chev.title = open ? '收起详情' : '展开详情';
+   chev.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5l6 6 6-6"/></svg>';
+   top.appendChild(chev);
+  }
+  b.appendChild(top);
+
+  /* 第二层：原地展开的抽屉（不跳页），操作在前、低频信息在后 */
+  if (s && !compact) {
+   const drawer = el('span', 'cdrawer');
+   b.appendChild(drawer);
+   /* 抽屉内部点击不触发整卡播放 */
+   drawer.addEventListener('click', ev => ev.stopPropagation());
+   /* 懒构建：120 张卡片若每张都先建 20+ 个节点，切一次筛选要多花 100-300ms */
+   const buildDrawer = () => {
+    if (drawer._built) return;
+    drawer._built = true;
+    const bodyEl = el('span', 'cbody');
+
+    const actsRow = el('span', 'cacts');
+   const mk = (label, icon, fn, cls2) => {
+    const a = el('button', 'cact' + (cls2 ? ' ' + cls2 : ''));
+    a.type = 'button';
+    a.innerHTML = ICON[icon] + '<span>' + label + '</span>';
+    a.addEventListener('click', ev => { ev.stopPropagation(); fn(); });
+    actsRow.appendChild(a);
+    return a;
+   };
+   mk(o.on && mode === 'playing' ? '暂停' : '播放',
+    o.on && mode === 'playing' ? 'pause' : 'play', () => play(s), 'primary');
+   mk('定位', 'loc', () => {
+    window.WW_EARTH.flyTo(s.lat, s.lon, 3.15);
+    toast('已定位 · ' + s.name);
+   });
+   mk(isFav(s) ? '已收藏' : '收藏', isFav(s) ? 'starOn' : 'star', () => {
+    if (isFav(s)) { fav = fav.filter(x => !same(x, s)); toast('已取消收藏'); }
+    else { fav = [compact(s), ...fav].slice(0, 200); toast('已收藏 · ' + s.name); }
+    save(KEY.fav, fav);
+    syncFav(s);
+    syncCounts();
+    renderL();
+    if (current && same(current, s)) renderR();
+   });
+   mk('分享', 'link', () => {
+    const url = location.href.split('#')[0] + '#@' + s.lat.toFixed(4) + ',' + s.lon.toFixed(4) + ',3.2';
+    if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => toast('链接已复制')).catch(() => toast(url));
+    else toast(url);
+   });
+   bodyEl.appendChild(actsRow);
+
+   const info = el('span', 'cinfo');
+   const line = (k, v, fn) => {
+    const r = el('span', 'crow');
+    r.appendChild(el('b', '', k));
+    const i = el('i', fn ? 'clink' : '', v);
+    if (fn) i.addEventListener('click', ev => { ev.stopPropagation(); fn(); });
+    r.appendChild(i);
+    info.appendChild(r);
+   };
+   if (s.cn && s.tier) line('分级', s.tier);
+   const co = sameCoordList(s).length;
+   if (co > 1) line('同址', co + ' 台同坐标', () => {
+    lPush('list', '同址 ' + co + ' 台', { items: sameCoordList(s) });
+   });
+   const host = hostOf(s);
+   if (host) line('流域', host);
+   line('坐标', s.lat.toFixed(2) + '°, ' + s.lon.toFixed(2) + '°');
+   bodyEl.appendChild(info);
+
+   /* 下级入口：同城若成簇就给同城，否则给「附近电台」——这两类下钻永远有内容 */
+   const cityList = sameCityList(s);
+   const nearList = stations
+    .filter(x => !same(x, s))
+    .map(x => ({ x, d: distKm(s, x) }))
+    .sort((a, b) => a.d - b.d)
+    .slice(0, 60)
+    .map(o2 => o2.x);
+   const moreBtn = (label, title, items) => {
+    const more = el('button', 'cmore');
+    more.type = 'button';
+    more.innerHTML = '<span>' + label + '</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>';
+    more.addEventListener('click', ev => {
+     ev.stopPropagation();
+     lPush('list', title, { items });
+    });
+    bodyEl.appendChild(more);
+   };
+   if (cityList.length > 1) moreBtn('同城电台 ' + cityList.length + ' 台', (cityShort(s) || '同城') + ' 的同城电台', cityList);
+   else if (nearList.length) moreBtn('附近电台 ' + nearList.length + ' 台', (s.name || '') + ' 附近的电台', nearList);
+
+    drawer.appendChild(bodyEl);
+   };
+   b._buildDrawer = buildDrawer;
+   if (open) buildDrawer();
+  }
+
+  /* 点击后到真正出声之间通常有 200-800ms，用一条不定进度条给出即时确认 */
+  if (pending) b.appendChild(el('i', 'cprog'));
+
+  if (chev) {
+   chev.addEventListener('click', ev => {
+    ev.preventDefault(); ev.stopPropagation();
+    const isOpen = b.classList.toggle('open');
+    if (isOpen) { EXPAND.add(key); openDrawer(b); } else { EXPAND.delete(key); closeDrawer(b); }
+    chev.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    chev.setAttribute('aria-label', isOpen ? '收起详情' : '展开详情');
+    chev.title = chev.getAttribute('aria-label');
+    if (isOpen) {
+     /* 展开后若卡片下缘被裁，轻轻把它带进视野，避免用户以为没反应 */
+     requestAnimationFrame(() => {
+      const box = b.getBoundingClientRect();
+      const host = $('lBody');
+      const hr = host ? host.getBoundingClientRect() : null;
+      if (hr && box.bottom > hr.bottom - 6) b.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+     });
+    }
+   });
+  }
+
+  if (o.click) b.addEventListener('click', ev => {
+   if (b._suppress) { b._suppress = false; ev.preventDefault(); ev.stopPropagation(); return; }
+   o.click(ev);
+  });
+  /* div 承载 role=button，需要自己补回 Enter / Space 的键盘激活 */
+  b.addEventListener('keydown', ev => {
+   if (ev.key !== 'Enter' && ev.key !== ' ') return;
+   if (ev.target !== b) return;
+   ev.preventDefault();
+   if (o.click) o.click(ev);
+  });
+  /* 触屏长按 → 操作单：不必依赖 hover 也能「只定位 / 收藏 / 复制链接」 */
+  if (s) {
+   b.addEventListener('pointerdown', e => {
+    if (e.pointerType !== 'touch') return;
+    clearTimeout(pressTimer);
+    pressStart = { x: e.clientX, y: e.clientY, moved: false };
+    pressTimer = setTimeout(() => {
+     if (!pressStart || pressStart.moved) return;
+     b._suppress = true;
+     setTimeout(() => { b._suppress = false; }, 700);
+     if (navigator.vibrate) { try { navigator.vibrate(10); } catch (err) {} }
+     openSheet(s, pressStart.x, pressStart.y);
+    }, 450);
+   });
+   b.addEventListener('pointermove', e => {
+    if (!pressStart) return;
+    if (Math.abs(e.clientX - pressStart.x) > 8 || Math.abs(e.clientY - pressStart.y) > 8) {
+     pressStart.moved = true;
+     clearTimeout(pressTimer);
+    }
+   }, { passive: true });
+   b.addEventListener('pointerup', () => clearTimeout(pressTimer));
+   b.addEventListener('pointercancel', () => clearTimeout(pressTimer));
+  }
+  if (o.name) b.title = (o.meta ? (o.name + ' · ' + o.meta) : o.name);
   if (s) {
    const E = window.WW_EARTH;
-   const hintOn = () => { if (E && E.hintStation) { const i = stations.indexOf(s); if (i >= 0) E.hintStation(i); } };
+   const hintOn = () => {
+    preconnect(s.stream);
+    if (E && E.hintStation) { const i = stations.indexOf(s); if (i >= 0) E.hintStation(i); }
+   };
    const hintOff = () => { if (E && E.clearHint) E.clearHint(); };
    b.addEventListener('mouseenter', hintOn);
    b.addEventListener('mouseleave', hintOff);
@@ -401,19 +744,23 @@ function feat(o) {
   return b;
 }
  function more(frag, total, shown) {
-  if (total <= shown) return;
+  if (total <= shown) return null;
   const b = el('button', 'pmore', '加载更多（还有 ' + fmt(total - shown) + ' 个）');
   b.type = 'button';
   b.addEventListener('click', () => { L.limit += 60; renderL(); });
   frag.appendChild(b);
+  return b;
  }
 function play(s) {
   const E = window.WW_EARTH;
   if (!E || !s) return;
+  /* 即时反馈：先登记「连接中」，随后播放会触发 ww:select → renderL，卡片据此画出进度条 */
+  PENDING = s;
   E.flyTo(s.lat, s.lon, 3.15);
   E.playStation(s);
   his = [compact(s), ...his.filter(x => !same(x, s))].slice(0, 40);
   save(KEY.his, his);
+  syncCounts();
 }
  function lPush(v, title, params) {
   L.stack.push(Object.assign({ v, title }, params || {}));
@@ -451,7 +798,8 @@ function play(s) {
  }
 function renderL() {
   const top = L.stack[L.stack.length - 1], body = $('lBody');
-  crumbs($('lCrumb'), L.stack, s => { L.stack = s; L.limit = 120; renderL(); });
+  HL = (top.v === 'list' && top.query) ? String(top.query).trim().toLowerCase() : '';
+  crumbs($('lCrumb'), L.stack, s => { L.stack = s; L.limit = 48; renderL(); });
   $('lBack').disabled = L.stack.length <= 1;
   mountFilters(top.v === 'root');
   renderNowStrip();
@@ -464,7 +812,10 @@ function renderL() {
    case 'list': renderStationList(f, top); break;
   }
   body.appendChild(f);
+  syncDrawers();
+  scheduleProbe();
   $('lCount').textContent = fmt(stations.length) + ' 个点位';
+  try { if (performance.mark) performance.mark('ww:first-cards'); } catch (e) {}
 }
 /* 根视图：分类标签（单步筛选）+ 扁平电台列表，去掉多层钻取。 */
 const CHIPS = [
@@ -472,7 +823,26 @@ const CHIPS = [
   ['北美洲', '北美洲'], ['非洲', '非洲'], ['南美洲', '南美洲'],
   ['大洋洲', '大洋洲'], ['hot', '热门'], ['fav', '收藏'], ['recent', '最近']
 ];
+/* 类型筛选：比卡片上的细分流派更宽，命中即归类（一台可能同时属于音乐与新闻） */
+const CATS = [
+  ['音乐', /music|musik|musique|m[uú]sica|hits|pop|rock|jazz|classic|dance|electronic|country|folk|blues|reggae|hip|rap|metal|punk|oldie|retro|gold|soul|funk|latin|ska|fm\b/i],
+  ['新闻', /news|noticias|informaci|journal|nachrichten|actualidad|press/i],
+  ['谈话', /talk|spoken|interview|debate|forum|discussion|chat|call[- ]?in/i],
+  ['体育', /sport|deport|f[uú]tbol|football|soccer|nba|racing/i],
+  ['爵士', /jazz|swing|bebop|blues/i],
+  ['古典', /classical|baroque|opera|symphon|philharm|orchestra|chamber/i]
+];
+function catOf(name) {
+  const n = String(name || '');
+  const out = [];
+  for (let i = 0; i < CATS.length; i++) if (CATS[i][1].test(n)) out.push(CATS[i][0]);
+  return out;
+}
 function filterStations(filter) {
+  if (filter.indexOf('g:') === 0) {
+   const cat = filter.slice(2);
+   return stations.filter(s => catOf(s.name).indexOf(cat) >= 0);
+  }
   if (filter === 'all') return stations;
   if (filter === 'cn') return stations.filter(s => s.cn);
   if (filter === 'hot') return stations.filter(s => s.alts && s.alts.length)
@@ -482,9 +852,12 @@ function filterStations(filter) {
   return stations.filter(s => continentOf(countryOf(s), s.lat, s.lon) === filter);
 }
 function labelOf(filter) {
+  if (filter.indexOf('g:') === 0) return filter.slice(2) + '电台';
   return { all: '全部电台', cn: '中国电台', hot: '热门电台', fav: '我的收藏', recent: '最近播放' }[filter]
    || (filter + '电台');
 }
+const CAT_CHIPS = [['g:音乐', '音乐'], ['g:新闻', '新闻'], ['g:谈话', '谈话'],
+  ['g:体育', '体育'], ['g:爵士', '爵士'], ['g:古典', '古典']];
 function chipRow() {
   const wrap = el('div', 'chips');
   CHIPS.forEach(([key, label]) => {
@@ -495,32 +868,48 @@ function chipRow() {
    b.addEventListener('click', () => setFilter(key));
    wrap.appendChild(b);
   });
+  /* 第二组：类型。占满一整行，避免和地区标签混在一起读不出层级 */
+  const div = el('div', 'chipdiv');
+  div.appendChild(el('span', 'chiplabel', '类型'));
+  CAT_CHIPS.forEach(([key, label]) => {
+   const b = el('button', 'chip gchip' + (L.filter === key ? ' on' : ''), label);
+   b.type = 'button';
+   b.dataset.k = key;
+   b.setAttribute('aria-pressed', L.filter === key ? 'true' : 'false');
+   b.addEventListener('click', () => setFilter(L.filter === key ? 'all' : key));
+   div.appendChild(b);
+  });
+  wrap.appendChild(div);
   return wrap;
 }
 /* 分类标签挂在滚动区之外（#lFilter），列表下拉时保持固定；点击大洲标签同时把地球转到该大洲 */
 const CHIP_VIEW = {
+  /* 「全部」= 完整地球视角（初始距离 9.0 附近，略微偏北看得更全） */
+  'all': [16, 12, 9.2],
   'cn': [34.2, 104, 3.55],
   '亚洲': [30, 95, 5.6], '欧洲': [50, 14, 5.0], '北美洲': [45, -100, 5.4],
   '非洲': [3, 20, 5.4], '南美洲': [-17, -60, 5.2], '大洋洲': [-25, 141, 5.0]
 };
 function setFilter(key) {
-  L.filter = key; L.limit = 120;
+  try { performance.mark('ww:chip-click'); } catch (e) {}
+  L.filter = key; L.limit = 48;
+  /* 先让地球起飞，再重建列表：120 张卡片的 DOM 构建会占住主线程，
+     放在 flyTo 之前就是「点了标签，1-2 秒后地球才动」的原因。 */
+  const v = CHIP_VIEW[key], E = window.WW_EARTH;
+  if (v && E && E.flyTo) E.flyTo(v[0], v[1], v[2], { dur: 1350 });
   const host = $('lFilter');
   if (host) [].forEach.call(host.querySelectorAll('.chip'), c => {
    const on = c.dataset.k === key;
    c.classList.toggle('on', on);
    c.setAttribute('aria-pressed', on ? 'true' : 'false');
   });
-  const body = $('lBody');
-  if (body) {
-   body.innerHTML = '';
-   const f = document.createDocumentFragment();
-   renderRoot(f);
-   body.appendChild(f);
-   body.scrollTop = 0;
-  }
-  const v = CHIP_VIEW[key], E = window.WW_EARTH;
-  if (v && E && E.flyTo) E.flyTo(v[0], v[1], v[2], { dur: 1350 });
+  /* 用 setTimeout 而非 rAF：软件渲染时一帧可能长达 1s，rAF 会把列表推迟到下一帧 */
+  setTimeout(() => {
+   try { performance.mark('ww:chip-render'); } catch (e) {}
+   renderL();
+   const b = $('lBody');
+   if (b) b.scrollTop = 0;
+  }, 0);
 }
 function mountFilters(show) {
   const host = $('lFilter');
@@ -661,7 +1050,9 @@ function tile(o) {
   fillIco(ic, o.icon);
   b.appendChild(ic);
   b.appendChild(el('div', 'tn', o.name));
-  b.appendChild(el('div', 'tv' + (o.small ? ' sm' : ''), o.value));
+  const tv = el('div', 'tv' + (o.small ? ' sm' : ''), o.value);
+  if (o.key) tv.setAttribute('data-count', o.key);
+  b.appendChild(tv);
   b.addEventListener('click', o.click);
   return b;
 }
@@ -701,13 +1092,24 @@ function renderChina(f, items) {
   const order = ['国家级', '省级', '市级', '网络电台'];
   const byTier = {};
   items.forEach(s => { const t = s.tier || '网络电台'; (byTier[t] = byTier[t] || []).push(s); });
+  /* 四个分级都会平铺，但总数控制在 L.limit，避免一次建 300+ 张卡片 */
+  let budget = L.limit;
+  const total = items.length;
   order.forEach(t => {
-   const list = byTier[t];
-   if (!list || !list.length) return;
-   f.appendChild(sec(t + ' · ' + list.length));
+   const all = byTier[t];
+   if (!all || !all.length || budget <= 0) return;
+   const list = all.slice(0, budget);
+   budget -= list.length;
+   f.appendChild(sec(t + ' · ' + all.length));
    list.forEach(s => f.appendChild(row({ name: s.name, meta: cityMeta(s), station: s,
     on: same(current, s), click: () => play(s) })));
   });
+  if (total > L.limit) {
+   const b = el('button', 'pmore', '加载更多（共 ' + fmt(total) + ' 个）');
+   b.type = 'button';
+   b.addEventListener('click', () => { L.limit += 60; renderL(); });
+   f.appendChild(b);
+  }
 }
 function renderStationList(f, top, side) {
   const items = top.items || [];
@@ -726,13 +1128,20 @@ function renderStationRows(f, list, title, side) {
   if (title) f.appendChild(sec(title));
   const isLeft = side !== 'r';
   const shown = Math.min(isLeft ? L.limit : 200, list.length);
-  for (let i = 0; i < shown; i++) {
+  const make = i => {
    const s = list[i];
-   f.appendChild(row({ name: s.name, meta: cityMeta(s), station: s,
-    on: same(current, s), click: () => play(s) }));
+   return row({ name: s.name, meta: cityMeta(s), station: s,
+    on: same(current, s), click: () => play(s) });
+  };
+  if (!isLeft) {
+   for (let i = 0; i < shown; i++) f.appendChild(make(i));
+   if (list.length > shown) f.appendChild(empty('仅显示最近 ' + shown + ' 个，共 ' + fmt(list.length) + ' 个电台'));
+   return;
   }
-  if (isLeft) more(f, list.length, shown);
-  else if (list.length > shown) f.appendChild(empty('仅显示最近 ' + shown + ' 个，共 ' + fmt(list.length) + ' 个电台'));
+  /* 一次画完，但把默认条数压到 48（约 3 屏）：
+     没有 GPU 的机器每帧要几百毫秒，分帧反而更慢；减少单次总量才是有效的。 */
+  for (let i = 0; i < shown; i++) f.appendChild(make(i));
+  more(f, list.length, shown);
 }
 
  /* ---------- 右侧播放 / 功能 ---------- */
@@ -754,6 +1163,30 @@ function renderStationRows(f, list, title, side) {
   st.dataset.mode = mode;
   st.textContent = MODE_TXT[mode] || '就绪';
  }
+ function helpOverlay() {
+  const old = $('wdHelp');
+  if (old) { old.remove(); return; }
+  const wrap = el('div', 'wdhelp');
+  wrap.id = 'wdHelp';
+  const card = el('div', 'wdhelp-card');
+  card.appendChild(el('div', 'wdhelp-t', '快捷键'));
+  [['Space', '播放 / 暂停'], ['G', '收藏当前电台'], ['N', '随机听一台'], ['/', '搜索电台'],
+   ['↑ ↓', '列表内移动'], ['F', '影院模式'], ['Esc', '停止 / 关闭'], ['?', '显示本帮助']]
+   .forEach(([k, v]) => {
+    const r = el('div', 'wdhelp-row');
+    r.appendChild(el('kbd', '', k));
+    r.appendChild(el('span', '', v));
+    card.appendChild(r);
+   });
+  const x = el('button', 'wdhelp-x', '关闭');
+  x.type = 'button';
+  x.addEventListener('click', () => wrap.remove());
+  card.appendChild(x);
+  wrap.appendChild(card);
+  wrap.addEventListener('click', e => { if (e.target === wrap) wrap.remove(); });
+  document.body.appendChild(wrap);
+ }
+
  /* ===== EQ 与睡眠定时器 =====
     真实音频滤波需把 <audio> 接入 WebAudio，第三方电台流普遍不返回 CORS 头，
     接入后会静音。因此默认使用「视觉律动」模式：三段增益始终控制律动形态并持久化；
@@ -839,7 +1272,7 @@ function renderStationRows(f, list, title, side) {
   toast('已取消睡眠定时'); renderR();
  }
  function soundSection() {
-  return fold('tools', '音效与定时', 'EQ', body => {
+  return fold('tools', '音效与定时', (EQ_PRESETS[EQ.preset] || {}).name || 'EQ', body => {
    const panel = el('div', 'eqpanel');
    const viz = el('div', 'eqviz');
    for (let i = 0; i < 9; i++) viz.appendChild(el('i'));
@@ -925,6 +1358,7 @@ function renderStationRows(f, list, title, side) {
 
   const main = el('div', 'nmain');
   const disc = el('div', 'disc' + (mode === 'playing' ? ' spin' : ''));
+  if (mode === 'paused' || mode === 'error') disc.style.opacity = '.85';
   const lab = el('div', 'dlabel ' + ((current.cn) ? 'g-cn' : continentGrad(current)));
   lab.textContent = (current.name || '?').trim().charAt(0).toUpperCase();
   const dbg = logoBg(current);
@@ -965,6 +1399,7 @@ function renderStationRows(f, list, title, side) {
    else { fav = [compact(current), ...fav].slice(0, 200); toast('已收藏 · ' + current.name); }
    save(KEY.fav, fav);
    syncFav(current);
+   syncCounts();
    renderR();
    if (L.stack[L.stack.length - 1].v === 'root') renderL();
   }, isFav(current) ? 'on' : '');
@@ -1011,7 +1446,7 @@ function renderStationRows(f, list, title, side) {
 
   /* ---------- 附近电台：可折叠（默认收起，减少长滚动） ---------- */
   const near = stations.filter(s => !same(s, current))
-   .map(s => ({ s, d: distKm(current, s) })).sort((a, b) => a.d - b.d).slice(0, 5);
+   .map(s => ({ s, d: distKm(current, s) })).sort((a, b) => a.d - b.d).slice(0, 3);
   f.appendChild(fold('near', '附近电台', near.length, body => {
    near.forEach(x => body.appendChild(row({ name: x.s.name, station: x.s,
     meta: cityShort(x.s), dist: x.d, click: () => play(x.s) })));
@@ -1084,11 +1519,72 @@ function renderStationRows(f, list, title, side) {
   renderFeatures(f);
  }
  /* 功能入口：真实数值用等宽数字，空值显示 — */
- function renderFeatures(f) {
+ /* 可见卡片的流域体检：只探前 12 张、并发 2、单次会话上限 24 次，
+   结果进 localStorage 缓存，失效的卡片压暗并标注，点击时也会自动跳到同址可用流。 */
+let probeTimer = null, probeBudget = 24, probeRunning = 0;
+const probeQueue = [];
+function pumpProbe() {
+ const E = window.WW_EARTH;
+ if (!E || !E.probeStream) return;
+ while (probeRunning < 2 && probeQueue.length) {
+  const job = probeQueue.shift();
+  probeRunning++;
+  E.probeStream(job.url).then(ok => {
+   probeRunning--;
+   probeBudget--;
+   if (job.el && job.el.isConnected) {
+    /* 正在播放 / 正在连接的台不判死：探测失败很可能是并发连接被拒 */
+    const busy = same(current, job.el._s);
+    if (ok === false && !busy) {
+     job.el.classList.add('dead');
+     job.el.title = '上次检测该流无法连接，可能已失效（仍可重试）';
+    } else if (ok === true) {
+     job.el.classList.remove('dead');
+    }
+   }
+   pumpProbe();
+  }).catch(() => { probeRunning--; pumpProbe(); });
+ }
+}
+function probeVisible() {
+ const E = window.WW_EARTH;
+ if (!E || !E.probeStream) return;
+ const c = navigator.connection;
+ if (c && (c.saveData || /(^|-)2g$/.test(String(c.effectiveType || '')))) return;
+ if (probeBudget <= 0) return;
+ const body = $('lBody');
+ if (!body) return;
+ const cards = [].slice.call(body.querySelectorAll('.prow.acard')).slice(0, 12);
+ cards.forEach(el2 => {
+  const st = el2._s;
+  if (!st || !st.stream || el2.classList.contains('dead')) return;
+  if (E.healthOf && E.healthOf(st.stream) !== null) {
+   if (E.healthOf(st.stream) === false) el2.classList.add('dead');
+   return;
+  }
+  if (probeQueue.length >= 12) return;
+  probeQueue.push({ url: st.stream, el: el2 });
+ });
+ pumpProbe();
+}
+function scheduleProbe() {
+ clearTimeout(probeTimer);
+ probeTimer = setTimeout(probeVisible, 1400);
+}
+/* 收藏 / 最近播放的计数就地更新：不整栏重绘，才能「瞬间」同步 */
+function syncCounts() {
+ const fv = fav.length ? fmt(fav.length) : '—';
+ const hv = his.length ? fmt(his.length) : '—';
+ [].forEach.call(document.querySelectorAll('[data-count="fav"]'), n => { n.textContent = fv; });
+ [].forEach.call(document.querySelectorAll('[data-count="his"]'), n => { n.textContent = hv; });
+ /* 左栏统计条里的收藏数（若存在） */
+ [].forEach.call(document.querySelectorAll('[data-count="lFav"]'), n => { n.textContent = fmt(fav.length); });
+}
+function renderFeatures(f) {
   const g = el('div', 'wdtiles');
-  g.appendChild(tile({ icon: 'fav', name: '我的收藏',
+  g.appendChild(tile({ icon: 'fav', name: '我的收藏', key: 'fav',
    value: fav.length ? fmt(fav.length) : '—', click: () => rPush('list', '收藏', { items: fav }) }));
-  g.appendChild(tile({ icon: 'his', name: '最近播放',
+  g.appendChild(tile({ icon: 'his', name: '最近播放', key: 'his',
    value: his.length ? fmt(his.length) : '—', click: () => rPush('list', '最近', { items: his }) }));
   g.appendChild(tile({ icon: 'gear', name: '显示与画质', value: '画质 · 旋转 · 地名', small: true,
    click: () => rPush('settings', '设置') }));
@@ -1212,7 +1708,7 @@ function renderStationRows(f, list, title, side) {
   if (!body) return;
   body.addEventListener('keydown', e => {
    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
-   const rows = Array.from(body.querySelectorAll('button')).filter(b => !b.disabled && b.offsetParent);
+   const rows = Array.from(body.querySelectorAll('button, [role="button"]')).filter(b => !b.disabled && b.offsetParent);
    if (!rows.length) return;
    const i = rows.indexOf(document.activeElement);
    const n = i < 0 ? 0 : (e.key === 'ArrowDown' ? Math.min(rows.length - 1, i + 1) : Math.max(0, i - 1));
@@ -1220,8 +1716,32 @@ function renderStationRows(f, list, title, side) {
    e.preventDefault();
   });
  }
+ /* 通用焦点移动：容器内没有焦点时落到首项 / 末项，有则按方向移动并滚动就位。
+    只认「一级可交互项」——卡片、标签、磁贴、同址行，跳过卡片内部的小按钮，
+    否则按一次 ↓ 只会跳到星标或定位图标上。 */
+ function focusables(container) {
+  return Array.from(container.querySelectorAll('button, [role="button"]')).filter(b => {
+   if (b.disabled || !b.offsetParent) return false;
+   const host = b.parentElement && b.parentElement.closest('.prow.acard, .pcard, .nalt, .chip');
+   return !host;        /* 嵌套在行内的小按钮不参与 ↑↓ 遍历 */
+  });
+ }
+ function moveFocusIn(container, dir) {
+  if (!container) return false;
+  const all = focusables(container);
+  if (!all.length) return false;
+  /* 电台行优先：↓ 的第一步应该落在第一张卡片，而不是统计条上的排序按钮 */
+  const rows = all.filter(b => b.classList.contains('prow') || b.classList.contains('nalt'));
+  const items = rows.length ? rows.concat(all.filter(b => rows.indexOf(b) < 0)) : all;
+  const i = items.indexOf(document.activeElement);
+  const n = i < 0 ? (dir > 0 ? 0 : items.length - 1)
+   : Math.min(items.length - 1, Math.max(0, i + dir));
+  items[n].focus({ preventScroll: true });
+  items[n].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  return true;
+ }
  function bind() {
-  $('lBack').addEventListener('click', () => { if (L.stack.length > 1) { L.stack.pop(); L.limit = 60; renderL(); } });
+  $('lBack').addEventListener('click', () => { if (L.stack.length > 1) { L.stack.pop(); L.limit = 48; renderL(); } });
   $('rBack').addEventListener('click', () => { if (R.stack.length > 1) { R.stack.pop(); renderR(); } });
   $('lCollapse').addEventListener('click', () => setPanel('left', false, true));
   $('rCollapse').addEventListener('click', () => setPanel('right', false, true));
@@ -1251,17 +1771,33 @@ function renderStationRows(f, list, title, side) {
    current = e.detail.station;
    his = [compact(current), ...his.filter(x => !same(x, current))].slice(0, 40);
    save(KEY.his, his);
+   syncCounts();
    R.stack = [{ v: 'now', title: '播放' }];
    renderR(); renderL();
-   /* 播放行滚动到可见范围（若当前列表包含它） */
+   /* 只做一次轻提示，不强行滚动：左栏顶部本来就有常驻「正在收听」条，
+      用户正在浏览的上下文不该被一次点选拽走。 */
    const on = $('lBody') && $('lBody').querySelector('.prow.on');
-   if (on) on.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+   if (on) {
+    on.classList.remove('dead');
+    on.classList.add('flash');
+    setTimeout(() => on.classList.remove('flash'), 1700);
+   }
   });
-  window.addEventListener('ww:stop', () => { current = null; renderR(); renderL(); });
+  window.addEventListener('ww:stop', () => { current = null; PENDING = null; renderR(); renderL(); });
   window.addEventListener('ww:mode', e => {
    mode = e.detail.mode;
    const t = $('rState');
    if (t) { t.dataset.mode = mode; t.textContent = MODE_TXT[mode] || '就绪'; }
+   /* 连接有结果（出声 / 失败 / 暂停）后收起进度条，卡片回到稳定态 */
+   if (mode === 'playing' || mode === 'error' || mode === 'paused') {
+    PENDING = null;
+    const body = $('lBody');
+    if (body) [].forEach.call(body.querySelectorAll('.prow.connecting'), c => {
+     c.classList.remove('connecting');
+     const bar = c.querySelector('.cprog');
+     if (bar) { bar.style.opacity = '0'; setTimeout(() => bar.remove(), 200); }
+    });
+   }
    syncHeroMode();
    renderNowStrip();
   });
@@ -1283,11 +1819,32 @@ function renderStationRows(f, list, title, side) {
    setPanel('left', !open, true);
    setPanel('right', !open, true);
   });
-  /* WAVE DECK 快捷键：Space 播放/暂停、G 收藏当前台、N 随机一台 */
+  /* WAVE DECK 快捷键：Space 播放/暂停、G 收藏当前台、N 随机一台、/ 搜索 */
   window.addEventListener('keydown', e => {
    const tag = e.target && e.target.tagName;
    if (tag === 'INPUT' || tag === 'TEXTAREA' || e.metaKey || e.ctrlKey || e.altKey) return;
+   /* 输入法组合期间不响应任何单字母快捷键，避免中文输入被当成命令 */
+   if (e.isComposing || e.keyCode === 229) return;
    const E = window.WW_EARTH;
+   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    const dir = e.key === 'ArrowDown' ? 1 : -1;
+    const tgt = e.target;
+    const inChips = tgt && tgt.closest && tgt.closest('#lFilter');
+    const inRight = tgt && tgt.closest && tgt.closest('#rBody');
+    const inLeft = tgt && tgt.closest && tgt.closest('#lBody');
+    let host = inChips ? $('lFilter') : (inRight ? $('rBody') : (inLeft ? $('lBody') : null));
+    /* 页面任意位置按 ↑↓ 也能直接进入左栏列表，不必先 Tab 进去 */
+    if (!host && document.body.dataset.left === '1') host = $('lBody');
+    if (host && moveFocusIn(host, dir)) e.preventDefault();
+    return;
+   }
+   if (e.key === '/') {
+    e.preventDefault();
+    if (document.body.dataset.left !== '1') setPanel('left', true, true);
+    const box = $('lSearch');
+    if (box) { box.focus(); box.select(); }
+    return;
+   }
    if (e.code === 'Space') {
     if (tag === 'BUTTON' || tag === 'SELECT') return;
     e.preventDefault();
@@ -1296,9 +1853,16 @@ function renderStationRows(f, list, title, side) {
     if (!current) return;
     if (isFav(current)) { fav = fav.filter(x => !same(x, current)); toast('已取消收藏'); }
     else { fav = [compact(current), ...fav].slice(0, 200); toast('已收藏 · ' + current.name); }
-    save(KEY.fav, fav); syncFav(current); renderR(); renderL();
+    save(KEY.fav, fav); syncFav(current); syncCounts(); renderR(); renderL();
    } else if (e.key === 'n' || e.key === 'N') {
     randomPlay();
+   } else if (e.key === '?') {
+    e.preventDefault();
+    helpOverlay();
+   } else if (e.key === 'Escape') {
+    const h = $('wdHelp');
+    if (h) { h.remove(); e.preventDefault(); }
+    else if (sheetEl) { closeSheet(); e.preventDefault(); }
    }
   });
  }
@@ -1309,6 +1873,8 @@ function renderStationRows(f, list, title, side) {
  }
  function boot() {
   if (!window.WW_EARTH) return setTimeout(boot, 60);
+  /* 触屏设备：hover 不可用，卡片右侧的「只定位」需要常驻，否则永远点不到 */
+  if (('ontouchstart' in window) || (navigator.maxTouchPoints || 0) > 0) document.body.classList.add('touch');
   /* localStorage 可能被手工篡改或来自旧版本，先清洗再渲染，避免 NaN 坐标污染相机 */
   fav = (Array.isArray(fav) ? fav : []).filter(valid);
   his = (Array.isArray(his) ? his : []).filter(valid);

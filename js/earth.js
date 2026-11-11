@@ -12,12 +12,14 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
  if (!host) return;
 
  const R = 2.35, FOV = 34, MARK_R = R * 1.002;
- const TEX = {
-  day: './vendor/earth-day-8k.jpg',
-  night: './vendor/earth-night-8k.jpg',
-  topo: './vendor/earth-topology.png',
-  clouds: './vendor/clouds.png'
- };
+const TEX = {
+ day: './vendor/earth-day-4k.jpg',
+ dayLo: './vendor/earth-day-2k.jpg',
+ night: './vendor/earth-night-4k.jpg',
+ nightLo: './vendor/earth-night-2k.jpg',
+ topo: './vendor/earth-topology.png',
+ clouds: './vendor/clouds.png'
+};
  /* 单文件版会把下面三处替换：快照内联、快照 URL 置空、瓦片本地目录置空。 */
  const SNAPSHOT_INLINE = null;
  const SNAPSHOT_URL = './data/radio-stations.json';
@@ -84,7 +86,38 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
  controls.zoomSpeed = 0.85;
  controls.autoRotate = !reducedMotion;
  controls.autoRotateSpeed = 0.22;
- controls.addEventListener('start', () => { controls.autoRotate = false; if (flyRAF) { cancelAnimationFrame(flyRAF); flyRAF = null; } });
+ controls.addEventListener('start', () => {
+ controls.autoRotate = false;
+ dragging = true;
+ if (flyRAF) { cancelAnimationFrame(flyRAF); flyRAF = null; }
+});
+controls.addEventListener('end', () => {
+ dragging = false;
+ /* 松手后再补一次，避免停在旧瓦片上 */
+ TILE.last = 0;
+ setTimeout(() => { if (!dragging) refreshTiles(false); }, 180);
+});
+
+/* ===================== 平滑变焦 =====================
+   OrbitControls 的 dolly 是「一格一跳」，滚轮缩放会顿。这里接管精确指针设备
+   的滚轮：只改写目标距离，由渲染循环按 0.18 的系数缓动逼近，滚多少滑多少。
+   触屏仍走 OrbitControls 原生双指缩放，避免自实现捏合手感更差。 */
+const finePointer = !!(window.matchMedia && window.matchMedia('(hover:hover) and (pointer:fine)').matches);
+let zoomGoal = camera.position.length();
+let zoomUntil = 0;
+if (finePointer) controls.enableZoom = false;
+const clampDist = v => Math.min(controls.maxDistance, Math.max(controls.minDistance, v));
+renderer.domElement.addEventListener('wheel', e => {
+ if (!finePointer) return;
+ e.preventDefault();
+ controls.autoRotate = false;
+ if (flyRAF) { cancelAnimationFrame(flyRAF); flyRAF = null; }
+ const unit = e.deltaMode === 1 ? 18 : (e.deltaMode === 2 ? 400 : 1);
+ zoomGoal = clampDist(zoomGoal * Math.exp(e.deltaY * unit * 0.0011));
+ zoomUntil = performance.now() + 240;
+ /* 一旦拉近到需要看清海岸线的距离，就立刻把 8K 提上来，而不是等空闲 */
+ if (zoomGoal < 4.6) upgradeDay();
+}, { passive: false });
 
  scene.add(new THREE.AmbientLight(0x9fb9d4, 0.95));
  /* 太阳方向按 UTC 时间估算，随真实昼夜移动；补光保证夜面不死黑。 */
@@ -132,14 +165,70 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
  const earthGroup = new THREE.Group();
  scene.add(earthGroup);
 
+ /* 贴图分级：先用 2K 预览秒出地球，空闲时再换 4K 高清。
+    8K（8192×4096）在弱机解码要 3–6s，且近景本来由卫星瓦片接管，
+    4K 已足够；换来首屏与首次缩放都不再被解码卡住。 */
+ const whenIdle = fn => {
+  if (window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 1500 });
+  else setTimeout(fn, 900);
+ };
+ const hiResAllowed = () => {
+  const c = navigator.connection;
+  if (c && /(^|-)2g$/.test(String(c.effectiveType || ''))) return false;
+  if ((navigator.deviceMemory || 4) < 2) return false;
+  return true;
+ };
+ /* 用 img.decode() 让解码发生在合成线程，再把已解码的位图交给 GPU，
+    避免 8K 到位时整个球面卡一帧。 */
+ function swapTexture(url, apply) {
+  const img = new Image();
+  img.decoding = 'async';
+  img.onload = () => {
+   try {
+    const t = tune(new THREE.Texture(img));
+    t.needsUpdate = true;
+    if (renderer.initTexture) renderer.initTexture(t);
+    apply(t);
+   } catch (e) { /* 解码失败保留预览贴图 */ }
+  };
+  img.onerror = () => {};
+  img.src = url;
+ }
+
  const earthMat = new THREE.MeshPhongMaterial({
   color: 0xffffff, specular: new THREE.Color(0x000000), shininess: 0,
   bumpScale: 0.03, emissive: new THREE.Color(0xffffff), emissiveIntensity: 0.18
  });
  earthGroup.add(new THREE.Mesh(new THREE.SphereGeometry(R, LOW ? 160 : 256, LOW ? 80 : 128), earthMat));
- loader.load(TEX.day, t => {
-  earthMat.map = tune(t); earthMat.emissiveMap = t; earthMat.needsUpdate = true;
- }, undefined, () => { earthMat.color.set(0x31536a); earthMat.emissiveIntensity = 0; });
+
+ let dayTex = null;
+ const applyDay = t => {
+  const old = dayTex;
+  dayTex = t;
+  earthMat.map = t; earthMat.emissiveMap = t; earthMat.needsUpdate = true;
+  if (old && old !== t) old.dispose();
+ };
+ let dayHi = false;
+ const upgradeDay = () => {
+  if (dayHi || !hiResAllowed()) return;
+  dayHi = true;
+  const doSwap = () => {
+   /* 正在滚轮变焦时不换贴图：GPU 上传 8K 会掉一帧，等手停下来再换 */
+   if (performance.now() < zoomUntil || dragging) { setTimeout(doSwap, 500); return; }
+   swapTexture(TEX.day, t => { applyDay(t); mark('tex-8k'); });
+  };
+  whenIdle(doSwap);
+ };
+ loader.load(TEX.dayLo, t => {
+  applyDay(tune(t));
+  mark('tex-preview');
+  /* 首帧之后再排队升 8K，避免和首屏渲染抢主线程 */
+  setTimeout(upgradeDay, 700);
+ }, undefined, () => {
+  /* 预览缺失时退到 8K 直连，保证不出现无贴图的蓝色球 */
+  loader.load(TEX.day, t => applyDay(tune(t)),
+   undefined, () => { earthMat.color.set(0x31536a); earthMat.emissiveIntensity = 0; });
+ });
  loader.load(TEX.topo, t => { earthMat.bumpMap = tune(t, false); earthMat.needsUpdate = true; });
 
  const nightUniform = {
@@ -166,10 +255,33 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
   ].join('\n'),
   transparent: true, blending: THREE.AdditiveBlending, depthWrite: false
  });
- loader.load(TEX.night, t => {
-  nightUniform.nightMap.value = tune(t);
-  const night = new THREE.Mesh(new THREE.SphereGeometry(R * 1.0016, 160, 80), nightMat);
-  night.renderOrder = 1; night.name = 'night'; earthGroup.add(night);
+ let nightTex = null, nightAdded = false;
+ const applyNight = t => {
+  const old = nightTex;
+  nightTex = t;
+  nightUniform.nightMap.value = t;
+  if (!nightAdded) {
+   const night = new THREE.Mesh(new THREE.SphereGeometry(R * 1.0016, 160, 80), nightMat);
+   night.renderOrder = 1; night.name = 'night'; earthGroup.add(night);
+   nightAdded = true;
+  }
+  if (old && old !== t) old.dispose();
+ };
+ let nightHi = false;
+ const upgradeNight = () => {
+  if (nightHi || !hiResAllowed()) return;
+  nightHi = true;
+  const doSwap = () => {
+   if (performance.now() < zoomUntil || dragging) { setTimeout(doSwap, 500); return; }
+   swapTexture(TEX.night, t => { applyNight(t); mark('tex-8k-night'); });
+  };
+  whenIdle(doSwap);
+ };
+ loader.load(TEX.nightLo, t => {
+  applyNight(tune(t));
+  setTimeout(upgradeNight, 1100);
+ }, undefined, () => {
+  loader.load(TEX.night, t => applyNight(tune(t)));
  });
 
  const cloudMat = new THREE.MeshPhongMaterial({ transparent: true, opacity: 0.075, depthWrite: false });
@@ -194,7 +306,10 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
   return { lat, lon };
  }
  const tileCache = new Map();
- const TILE = { key: '', mesh: null, tex: null, loading: false, req: 0, last: 0, failed: 0 };
+ const TILE = { key: '', z: 0, mesh: null, prev: null, tex: null, loading: false, req: 0, last: 0, failed: 0 };
+ /* 拖拽/缩放进行中不重建瓦片：旧层会被瞬间移除、新层从 0 淡入，
+    这正是「一拖动地球就闪一下」的根因。 */
+ let dragging = false;
  function tileURL(z, x, y) {
   return TILE_BASE ? TILE_BASE + '/' + z + '/' + x + '/' + y + '.jpg' : TILE_REMOTE(z, x, y);
  }
@@ -234,10 +349,17 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
   const halfKm = h * (6371 / R) * Math.tan(FOV * Math.PI / 360) * 1.25;
   const halfLat = Math.min(38, Math.max(0.05, halfKm / 111));
   const halfLon = Math.min(70, halfLat / Math.max(0.15, Math.cos(geo.lat * Math.PI / 180)));
-  const z = Math.max(3, Math.min(14, Math.round(Math.log2(720 / Math.max(0.02, halfLon)))));
+  const zIdeal = Math.max(3, Math.min(14, Math.round(Math.log2(720 / Math.max(0.02, halfLon)))));
+  /* 迟滞：缩放时 zIdeal 会在 6/7 边界抖动，没有迟滞就会每 0.3s 重建一次整层 */
+  const keep = TILE.z && Math.abs(zIdeal - TILE.z) <= 0.6;
+  const z = keep ? TILE.z : zIdeal;
   const n = Math.pow(2, z);
-  const xf0 = (geo.lon - halfLon + 180) / 360 * n, xf1 = (geo.lon + halfLon + 180) / 360 * n;
-  const yf0 = mercY(geo.lat + halfLat) * n, yf1 = mercY(geo.lat - halfLat) * n;
+  /* 中心直接取视野中心，再按「瓦片索引」取整：同一块瓦片内移动不会换 key。
+     之前按视野比例量化，缩放时视野一变量化栅格也跟着变，反而每帧都换 key。 */
+  const cLat = Math.max(-84, Math.min(84, geo.lat));
+  const cLon = geo.lon;
+  const xf0 = (cLon - halfLon + 180) / 360 * n, xf1 = (cLon + halfLon + 180) / 360 * n;
+  const yf0 = mercY(cLat + halfLat) * n, yf1 = mercY(cLat - halfLat) * n;
   const cx = Math.floor((xf0 + xf1) / 2), cy = Math.floor((yf0 + yf1) / 2);
   const tx0 = Math.max(0, Math.max(Math.floor(xf0), cx - 2));
   const tx1 = Math.min(n - 1, Math.min(Math.ceil(xf1) - 1, cx + 2));
@@ -246,19 +368,23 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
   if (tx1 < tx0 || ty1 < ty0) return null;
   return { z, n, tx0, tx1, ty0, ty1 };
  }
+ function disposeTileMesh(m) {
+  if (!m) return;
+  earthGroup.remove(m);
+  if (m.geometry) m.geometry.dispose();
+  const mat = m.material;
+  if (mat) { if (mat.map) mat.map.dispose(); mat.dispose(); }
+ }
  function disposeTiles() {
-  if (TILE.mesh) {
-   earthGroup.remove(TILE.mesh);
-   TILE.mesh.geometry.dispose();
-   TILE.mesh.material.dispose();
-   TILE.mesh = null;
-  }
-  if (TILE.tex) { TILE.tex.dispose(); TILE.tex = null; }
+  disposeTileMesh(TILE.mesh); TILE.mesh = null;
+  disposeTileMesh(TILE.prev); TILE.prev = null;
+  TILE.tex = null;
  }
  async function refreshTiles(force) {
   if (TILE.loading) return;
+  if (!force && (dragging || performance.now() < zoomUntil + 120)) return;
   const spec = tileSpec();
-  if (!spec) { if (TILE.mesh) TILE.mesh.visible = false; TILE.key = ''; return; }
+  if (!spec) { if (TILE.mesh) TILE.mesh.visible = false; TILE.key = ''; TILE.z = 0; return; }
   const key = [spec.z, spec.tx0, spec.tx1, spec.ty0, spec.ty1].join('/');
   if (!force && key === TILE.key && TILE.mesh) return;
   TILE.loading = true;
@@ -270,9 +396,17 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
   catch (e) { imgs = []; }
   TILE.loading = false;
   if (req !== TILE.req) return;
+  /* 等待期间视角已经变了：这批瓦片过期，丢掉，下一轮再取 */
+  if (!force) {
+   const now = tileSpec();
+   if (!now) return;
+   const nowKey = [now.z, now.tx0, now.tx1, now.ty0, now.ty1].join('/');
+   if (nowKey !== key) return;
+  }
   if (!imgs.some(Boolean)) { TILE.failed++; if (TILE.mesh) TILE.mesh.visible = false; return; }
   applyTileMesh(spec, jobs, imgs);
   TILE.key = key;
+  TILE.z = spec.z;
  }
  function applyTileMesh(spec, jobs, imgs) {
   const cols = spec.tx1 - spec.tx0 + 1, rows = spec.ty1 - spec.ty0 + 1;
@@ -313,16 +447,21 @@ import { OrbitControls } from '../vendor/OrbitControls.js';
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
   g.setIndex(idx); g.computeVertexNormals();
-  disposeTiles();
+  /* 交叉淡化：旧层留到新层淡入完成再销毁，中间不出现「底图裸露」的一帧 */
+  if (TILE.mesh) {
+   if (TILE.prev) disposeTileMesh(TILE.prev);
+   TILE.prev = TILE.mesh;
+  }
   TILE.tex = new THREE.CanvasTexture(cv);
   TILE.tex.colorSpace = THREE.SRGBColorSpace;
   TILE.tex.anisotropy = maxAniso;
   const mat = new THREE.MeshBasicMaterial({
-   map: TILE.tex, transparent: true, opacity: 0.01, depthWrite: false,
+   map: TILE.tex, transparent: true, opacity: 0, depthWrite: false,
    side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -3, toneMapped: false
   });
   TILE.mesh = new THREE.Mesh(g, mat);
   TILE.mesh.renderOrder = 3;
+  TILE.mesh.visible = false;
   earthGroup.add(TILE.mesh);
  }
 
@@ -493,6 +632,7 @@ function ensureHint() {
   console.info('[WORLDWAVE]', label, merged.length, 'markers');
   if (ui.info) ui.info.textContent = '当前目录 ' + merged.length + ' 个点位' + extra;
   window.dispatchEvent(new CustomEvent('ww:catalog', { detail: { count: merged.length, label } }));
+  mark('catalog');
  }
  /* 在线刷新只补充新网格，绝不替换已验证的快照流；簇内信息也保留。
     同一 0.02° 网格内的重复点位会被合并，但被合并的流不会丢弃——挂到幸存点的
@@ -744,6 +884,73 @@ function ensureHint() {
   if (n === 'NotAllowedError') return '浏览器阻止了自动播放，请再次点击';
   return '流不可达或已失效';
  }
+ /* ===================== 流域健康度 =====================
+    公开电台经常 403/超时。点下去才等 8 秒报错体感很差，所以：
+    ① 本地缓存最近 6 小时的探测结果；② 选台时把已知失效的排到最后；
+    ③ 连接 3.6s 仍无数据就快速失败并换同址流。 */
+ const HEALTH = new Map(), HEALTH_TTL = 6 * 3600 * 1000;
+ try {
+  const raw = JSON.parse(localStorage.getItem('ww.stream.health.v1') || '{}');
+  Object.keys(raw).forEach(k => HEALTH.set(k, raw[k]));
+ } catch (e) {}
+ let healthSaveTimer = null;
+ function saveHealth() {
+  clearTimeout(healthSaveTimer);
+  healthSaveTimer = setTimeout(() => {
+   try {
+    const out = {};
+    let n = 0;
+    HEALTH.forEach((v, k) => { if (n < 600) { out[k] = v; n++; } });
+    localStorage.setItem('ww.stream.health.v1', JSON.stringify(out));
+   } catch (e) {}
+  }, 1500);
+ }
+ function healthOf(url) {
+  const h = HEALTH.get(url);
+  return h && Date.now() - h.at < HEALTH_TTL ? h.ok : null;   /* null = 未知 */
+ }
+ function setHealth(url, ok) {
+  if (!url) return;
+  HEALTH.set(url, { ok: !!ok, at: Date.now() });
+  saveHealth();
+ }
+ const probing = new Set();
+ function probeStream(url) {
+  if (!url || probing.has(url)) return Promise.resolve(healthOf(url));
+  const known = healthOf(url);
+  if (known !== null) return Promise.resolve(known);
+  probing.add(url);
+  return new Promise(res => {
+   const a = new Audio();
+   let done = false;
+   const finish = ok => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    a.removeEventListener('loadedmetadata', okFn);
+    a.removeEventListener('canplay', okFn);
+    a.removeEventListener('error', badFn);
+    try { a.pause(); a.removeAttribute('src'); a.load(); } catch (e) {}
+    probing.delete(url);
+    if (ok !== null) setHealth(url, ok);
+    res(ok);
+   };
+   const okFn = () => finish(true);
+   const badFn = () => finish(false);
+   /* 超时只代表「这次没测出来」，不能判死：慢网下的好流也会超时 */
+   const timer = setTimeout(() => finish(null), 5200);
+   a.preload = 'metadata';
+   a.muted = true;
+   a.addEventListener('loadedmetadata', okFn);
+   a.addEventListener('canplay', okFn);
+   a.addEventListener('error', badFn);
+   a.src = url;
+   a.load();
+  });
+ }
+
+ let failTimer = null;
+ function clearFailTimer() { if (failTimer) { clearTimeout(failTimer); failTimer = null; } }
  function playCurrent() {
   if (!current) return;
   const entry = current.list[current.idx];
@@ -754,20 +961,37 @@ function ensureHint() {
   audio.volume = volume;
   setMode('loading', '正在连接 · ' + entry.name);
   enableControls(true);
+  /* 3.6s 还没有任何音频数据就判定失败，比等浏览器自己报错快得多 */
+  clearFailTimer();
+  failTimer = setTimeout(() => {
+   if (my !== playToken) return;
+   if (!audio.paused && audio.readyState >= 2) return;
+   onPlayFail(new Error('timeout'), entry);
+  }, 2600);
   const p = audio.play();
   if (p && typeof p.then === 'function') {
-   p.then(() => { if (my === playToken) setMode('playing', '▶ ' + entry.name); })
-    .catch(err => { if (my === playToken) onPlayFail(err, entry); });
-  } else setMode('playing', '▶ ' + entry.name);
+   p.then(() => {
+    if (my !== playToken) return;
+    clearFailTimer();
+    setHealth(entry.stream, true);
+    setMode('playing', '▶ ' + entry.name);
+   }).catch(err => { if (my === playToken) onPlayFail(err, entry); });
+  } else {
+   clearFailTimer();
+   setHealth(entry.stream, true);
+   setMode('playing', '▶ ' + entry.name);
+  }
  }
  function onPlayFail(err, entry) {
+  clearFailTimer();
   rememberBad(entry.stream);
+  setHealth(entry.stream, false);
   if (!current) return;
   current.tries = (current.tries || 0) + 1;
   if (current.list.length > 1 && current.tries < current.list.length) {
    current.idx = (current.idx + 1) % current.list.length;
    enableControls(true);
-   setMode('loading', '换用同位置其它电台…');
+   setMode('loading', '换用备用流 · ' + current.list[current.idx].name + '…');
    playCurrent();
    return;
   }
@@ -781,8 +1005,43 @@ function ensureHint() {
  function selectStation(i) {
   const s = stations[i];
   if (!s) return;
-  const list = [{ name: s.name, stream: s.stream }, ...(s.alts || [])].filter(e => usableStream(e.stream));
+  /* 候选链：本台 → 同址其它台 → 同城台 → 最近台。公开流失效很常见，
+     只挂在本台上会导致「点了没声音」，扩到附近后几乎总能出声。 */
+  /* 本地等值判断：earth.js 里没有 panels 的 same()，之前直接调用会抛 ReferenceError，
+     导致点绿点/点卡片完全没反应。 */
+  const isSame = (a, b) => !!a && !!b && a.lat === b.lat && a.lon === b.lon && a.name === b.name;
+  const cityKey = x => String(x.city || '').split(',')[0].trim().toLowerCase();
+  const myCity = cityKey(s);
+  const cosd = x => {
+   const a = geoToVec3(s.lat, s.lon, 1), b = geoToVec3(x.lat, x.lon, 1);
+   return Math.max(-1, Math.min(1, a.dot(b)));
+  };
+  const sameCity = myCity
+   ? stations.filter(x => !isSame(x, s) && cityKey(x) === myCity).slice(0, 4)
+   : [];
+  const nearest = stations
+   .filter(x => !isSame(x, s) && cityKey(x) !== myCity)
+   .map(x => ({ x, c: cosd(x) }))
+   .sort((a, b) => b.c - a.c)
+   .slice(0, 3)
+   .map(o => o.x);
+  const raw = [s, ...sameCity, ...nearest];
+  const seenStream = new Set();
+  const list = [];
+  raw.forEach(x => {
+   const alts = (x === s) ? (s.alts || []) : (x.alts || []);
+   [{ name: x.name, stream: x.stream, host: x.name }, ...alts.map(a => ({ name: a.name, stream: a.stream, host: x.name }))]
+    .forEach(e => {
+     if (!usableStream(e.stream) || seenStream.has(e.stream)) return;
+     seenStream.add(e.stream);
+     list.push(e);
+    });
+  });
   if (!list.length) { setMode('error', '该点位暂无可播放的电台'); return; }
+  /* 已知可用的排前面、未知居中、已知失效沉底：首选命中率明显更高 */
+  const rank = e => { const h = healthOf(e.stream); return h === true ? 0 : (h === null ? 1 : 2); };
+  list.sort((a, b) => rank(a) - rank(b));
+  if (list.length > 4) list.length = 4;
   current = { i, idx: 0, tries: 0, list };
   markSelected(s);
   enableControls(true);
@@ -791,6 +1050,7 @@ function ensureHint() {
  }
  function stop() {
   playToken++;
+  clearFailTimer();
   audio.pause();
   audio.removeAttribute('src');
   try { audio.load(); } catch (e) { /* noop */ }
@@ -844,15 +1104,21 @@ function focusOn(lat, lon, d) {
   controls.target.set(0, 0, 0);
   controls.autoRotate = false;
   controls.update();
+  zoomGoal = len;
 }
 /* 平滑飞行定位：先在大圆轨迹上把目标点旋到正前方（保持当前距离），
    再在第二段缓动拉近相机距离 —— 形成「旋转到位 → 再放大」的流畅观感，
    避免瞬移或穿模。与 OrbitControls 阻尼互不打架：每帧直接写相机位置后 update。 */
-let flyRAF = null;
+let flyRAF = null, flyStartAt = 0;
+/* 性能标记：用 performance.mark 记录关键阶段，便于与旧版本做同源 A/B */
+function mark(name) {
+ try { if (window.performance && performance.mark) performance.mark('ww:' + name); } catch (e) {}
+}
 function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
 function flyTo(lat, lon, d, opts) {
   const dur = (opts && opts.dur) || 1150;
   const toLen = Math.min(controls.maxDistance, Math.max(controls.minDistance, d || 3.15));
+  if (toLen < 4.6) upgradeDay();
   const fromDir = camera.position.clone().normalize();
   const toDir = geoToVec3(lat, lon, 1).normalize();
   const fromLen = Math.max(controls.minDistance, camera.position.length());
@@ -877,8 +1143,10 @@ function flyTo(lat, lon, d, opts) {
     controls.target.set(0, 0, 0);
     controls.update();
     if (p < 1) flyRAF = requestAnimationFrame(step);
-    else flyRAF = null;
+    else { flyRAF = null; zoomGoal = camera.position.length(); }
   }
+  flyStartAt = performance.now();
+  mark('fly-start');
   flyRAF = requestAnimationFrame(step);
 }
  function renderResults(q) {
@@ -962,7 +1230,7 @@ function flyTo(lat, lon, d, opts) {
  });
 /* 悬停浮层：鼠标移到绿色圆点上时，在光标旁显示电台名片（名称 / 地区 / 层级）。
    不触发 aria-live，避免屏幕阅读器被刷屏。 */
-let hoverEl = null, hoverIdx = -1;
+let hoverEl = null, hoverIdx = -1, hoverTimer = null;
 function ensureHover() {
   if (hoverEl) return;
   hoverEl = document.createElement('div');
@@ -996,8 +1264,25 @@ renderer.domElement.addEventListener('pointermove', e => {
   hoverAt = t;
   const i = pick(e);
   renderer.domElement.style.cursor = i !== null ? 'pointer' : 'grab';
-  if (i !== null) { if (i !== hoverIdx) { hoverIdx = i; showHover(i, e); } else showHover(i, e); }
-  else { hoverIdx = -1; hideHover(); }
+  if (i !== null) {
+   if (i === hoverIdx) {
+    /* 同一颗绿点：只跟随指针位置，不重放动画，避免文字闪烁 */
+    clearTimeout(hoverTimer);
+    showHover(i, e);
+   } else {
+    /* 换点：先进入 90ms 意图缓冲，扫过密集点阵时不至于一路弹名片 */
+    hoverIdx = i;
+    clearTimeout(hoverTimer);
+    const px = e.clientX, py = e.clientY;
+    hoverTimer = setTimeout(() => {
+     if (hoverIdx === i) showHover(i, { clientX: px, clientY: py });
+    }, 90);
+   }
+  } else {
+   hoverIdx = -1;
+   clearTimeout(hoverTimer);
+   hideHover();
+  }
   /* 悬停只更新可视文字，不触发 aria-live 播报，避免屏幕阅读器被刷屏 */
   if (!current && ui.title) {
    if (i !== null) {
@@ -1006,7 +1291,17 @@ renderer.domElement.addEventListener('pointermove', e => {
    } else ui.title.textContent = idleText();
   }
 });
-renderer.domElement.addEventListener('pointerleave', () => { hoverIdx = -1; hideHover(); });
+renderer.domElement.addEventListener('pointerleave', () => {
+ hoverIdx = -1;
+ clearTimeout(hoverTimer);
+ hideHover();
+});
+/* 开始拖拽时立刻收起名片：拖动过程中名片跟着鼠标飘会非常吵 */
+controls.addEventListener('start', () => {
+ clearTimeout(hoverTimer);
+ hoverIdx = -1;
+ hideHover();
+});
 
  /* ===================== 尺寸 / 自适应画质 ===================== */
  let quality = 1, frames = 0, fpsAt = performance.now();
@@ -1092,6 +1387,29 @@ renderer.domElement.addEventListener('pointerleave', () => { hoverIdx = -1; hide
    playCurrent();
   },
   flyTo: (lat, lon, d, opts) => flyTo(lat, lon, d, opts),
+  probeStream,
+  healthOf,
+  /* 调试：拾取与选中（用于自动化验证） */
+  __pickAt: (x, y) => pick({ clientX: x, clientY: y }),
+  __select: i => selectStation(i),
+  /* 调试：选中环的屏幕几何（环心、半径、与点位的偏差） */
+  __ringDebug() {
+   if (!selGroup || !selRing) return null;
+   const c = selGroup.position.clone().project(camera);
+   const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+   const rr = RING_BASE_R * (1 + RING_W) * selGroup.scale.x;
+   const e = selGroup.position.clone().add(right.multiplyScalar(rr)).project(camera);
+   const rect = renderer.domElement.getBoundingClientRect();
+   const toPx = v => ({ x: rect.left + (v.x * 0.5 + 0.5) * rect.width, y: rect.top + (-v.y * 0.5 + 0.5) * rect.height });
+   const a = toPx(c), b = toPx(e);
+   return {
+    visible: selGroup.visible && selRing.visible,
+    opacity: selRing.material.opacity,
+    center: { x: +a.x.toFixed(2), y: +a.y.toFixed(2) },
+    radiusPx: +Math.hypot(b.x - a.x, b.y - a.y).toFixed(2),
+    glow: !!(selGlow && selGlow.visible)
+   };
+  },
   hintStation: i => showHint(i),
   clearHint: () => clearHint(),
   /* 供自检/调试观察选中环状态（细环是否重建、屏幕尺寸缩放是否生效） */
@@ -1115,7 +1433,14 @@ renderer.domElement.addEventListener('pointerleave', () => { hoverIdx = -1; hide
    return {
     count: stations.length, quality: +quality.toFixed(2), qualityMode,
     showLabels, showPoints, autoRotate: controls.autoRotate, rotateSpeed: +controls.rotateSpeed.toFixed(3),
-    tiles: { key: TILE.key, ready: !!(TILE.mesh && TILE.mesh.visible), failed: TILE.failed },
+    camDist: +camera.position.length().toFixed(3), zoomGoal: +zoomGoal.toFixed(3),
+    flying: !!flyRAF, flyAge: flyStartAt ? Math.round(performance.now() - flyStartAt) : null,
+    tiles: {
+     key: TILE.key, ready: !!(TILE.mesh && TILE.mesh.visible), failed: TILE.failed,
+     opacity: TILE.mesh ? +TILE.mesh.material.opacity.toFixed(3) : 0,
+     prev: TILE.prev ? +TILE.prev.material.opacity.toFixed(3) : null,
+     dragging
+    },
     render: { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles }
    };
   },
@@ -1138,12 +1463,22 @@ renderer.domElement.addEventListener('pointerleave', () => { hoverIdx = -1; hide
   requestAnimationFrame(animate);
   fpsTick(t || performance.now());
   controls.update();
+  /* 滚轮缩放缓动：朝目标距离线性逼近，末端收敛到 1e-3 以内再吸附 */
+  if (finePointer && !flyRAF) {
+   const cur = camera.position.length();
+   const goal = clampDist(zoomGoal);
+   if (Math.abs(goal - cur) > 1e-3) camera.position.setLength(cur + (goal - cur) * 0.18);
+   else if (cur !== goal) camera.position.setLength(goal);
+   if (performance.now() > zoomUntil && Math.abs(goal - cur) <= 1e-3) zoomGoal = camera.position.length();
+  }
   camera.updateMatrixWorld();
   const dist = camera.position.length();
   /* 近景时降低拖拽灵敏度：贴到地表后同样的角速度会让画面扫得飞快，按距离等比收敛 */
   controls.rotateSpeed = 0.55 * Math.min(1, Math.max(0.34, dist / 9));
   /* 标记环保持恒定屏幕尺寸；选中环叠加缓慢呼吸的柔光 */
   if (selGroup) {
+   /* 正对相机：贴球面的圆在斜视时会被投成椭圆，视觉中心偏到绿点之外 */
+   selGroup.quaternion.copy(camera.quaternion);
    selGroup.scale.setScalar(ringScaleFor(selGroup.position));
    if (selGlow) {
     const ph = (((t || performance.now()) - selGlowAt) % 2600) / 2600;
@@ -1151,7 +1486,10 @@ renderer.domElement.addEventListener('pointerleave', () => { hoverIdx = -1; hide
     selGlow.material.opacity = 0.46 * Math.pow(1 - ph, 1.6);
    }
   }
-  if (hintRing && hintRing.visible) hintRing.scale.setScalar(ringScaleFor(hintRing.position));
+  if (hintRing && hintRing.visible) {
+   hintRing.quaternion.copy(camera.quaternion);
+   hintRing.scale.setScalar(ringScaleFor(hintRing.position));
+  }
   const w = renderer.domElement.clientWidth || window.innerWidth;
   const h = renderer.domElement.clientHeight || window.innerHeight;
   starMat.opacity = 0.7 * Math.min(1, Math.max(0, (dist - 3.2) / 3.2));
@@ -1162,13 +1500,21 @@ renderer.domElement.addEventListener('pointerleave', () => { hoverIdx = -1; hide
   clouds.rotation.y += 0.0001;
   labelLayer.visible = showLabels;
   if (points) points.visible = showPoints;
+  const tileWant = dist > 6.2 ? 0 : 0.98;
   if (TILE.mesh) {
-   const target = dist > 6.2 ? 0 : 0.98;
    const mat = TILE.mesh.material;
-   mat.opacity += (target - mat.opacity) * 0.12;
-   TILE.mesh.visible = mat.opacity > 0.02;
+   mat.opacity += (tileWant - mat.opacity) * 0.18;
+   TILE.mesh.visible = mat.opacity > 0.01;
   }
-  if ((t || 0) - TILE.last > 420) {
+  if (TILE.prev) {
+   const pm = TILE.prev.material;
+   /* 新层没到位就撤旧层，会露出 2K 底图 —— 那正是「闪一下」的观感来源 */
+   const nm = TILE.mesh ? TILE.mesh.material : null;
+   if (!nm || nm.opacity > 0.8 || !TILE.mesh.visible) pm.opacity *= 0.82;
+   if (pm.opacity < 0.015) { disposeTileMesh(TILE.prev); TILE.prev = null; }
+   else TILE.prev.visible = true;
+  }
+  if (!dragging && performance.now() > zoomUntil + 120 && (t || 0) - TILE.last > 520) {
    TILE.last = t || 0;
    refreshTiles(false);
   }

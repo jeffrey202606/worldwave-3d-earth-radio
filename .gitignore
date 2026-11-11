@@ -4,3 +4,5 @@ node_modules/
 *.log
 _verify.cjs
 _shot.cjs
+
+.vercel

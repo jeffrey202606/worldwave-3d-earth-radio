@@ -44,6 +44,21 @@ const TEX = {
  const DPR_CAP = LOW ? 1.4 : 2;
 
  function say(text) { if (ui.status) ui.status.textContent = text; }
+/* ===== 详情抽屉打开时左移投影中心 =====
+   抽屉占右侧 520px，若不动相机，选中的点会被压在抽屉底下。
+   这里用 setViewOffset 把画面整体左移半个抽屉宽，让地球落在可见区域的中心；
+   拾取走的是 camera.projectionMatrix 的逆矩阵，因此偏移后点选依然对得上。 */
+let viewOffsetX = 0;
+function setViewOffset(px) {
+ viewOffsetX = px || 0;
+ const el = renderer.domElement;
+ const w = el.clientWidth || window.innerWidth;
+ const h = el.clientHeight || window.innerHeight;
+ if (!viewOffsetX) camera.clearViewOffset();
+ else camera.setViewOffset(w, h, viewOffsetX, 0, w, h);
+ camera.updateProjectionMatrix();
+}
+
  function setMode(mode, text) {
   if (ui.bar) ui.bar.dataset.mode = mode;
   if (ui.title) ui.title.textContent = text;
@@ -502,20 +517,25 @@ renderer.domElement.addEventListener('wheel', e => {
  }
  let stations = [], pointArray = null, points = null, selectedRing = null, ringMat = null;
  const markerMat = new THREE.ShaderMaterial({
-  uniforms: { uDpr: { value: 1 } },
+  uniforms: { uDpr: { value: 1 }, uSearch: { value: 0 } },
   vertexShader: [
-   'attribute float aBig; uniform float uDpr;',
+   'attribute float aBig; attribute float aMatch;',
+   'uniform float uDpr; uniform float uSearch;',
+   'varying float vA;',
    'void main(){',
    ' gl_PointSize=mix(3.0,6.4,aBig)*uDpr;',
+   /* 搜索激活时：匹配点保持原亮度，其余压到 0.15 —— 只降不升，避免出现「发光」的错觉 */
+   ' vA=mix(1.0, mix(0.15,1.0,aMatch), uSearch);',
    ' gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);',
    '}'
   ].join('\n'),
   fragmentShader: [
+   'varying float vA;',
    'void main(){',
    ' float d=length(gl_PointCoord-vec2(0.5))*2.0;',
    ' float a=1.0-smoothstep(0.82,1.0,d);',
    ' if(a<0.02) discard;',
-   ' gl_FragColor=vec4(0.44,0.78,0.31,a);',
+   ' gl_FragColor=vec4(0.44,0.78,0.31,a*vA);',
    '}'
   ].join('\n'),
   transparent: true, depthWrite: false, depthTest: true, toneMapped: false
@@ -532,11 +552,44 @@ renderer.domElement.addEventListener('wheel', e => {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
   geo.setAttribute('aBig', new THREE.BufferAttribute(big, 1));
+  /* aMatch：搜索命中掩码，默认全 1；只在搜索结果变化时整体重写一次 */
+  geo.setAttribute('aMatch', new THREE.BufferAttribute(new Float32Array(n).fill(1), 1));
   points = new THREE.Points(geo, markerMat);
   points.renderOrder = 4;
   earthGroup.add(points);
   pointArray = arr; stations = list;
+  /* 点云重建后 aMatch 是全新数组，必须把当前搜索掩码重放一次，否则高亮会悄悄失效 */
+  if (matchKeys) applyMatchMask();
  }
+/* ===== 搜索与地球联动 =====
+   面板把命中的电台传进来，这里按「经纬度+台名」比对写 aMatch；
+   uSearch 用 0→1 的缓动做淡入淡出，避免生硬跳变。传 null 表示清空搜索。 */
+let matchTarget = 0, matchNow = 0, matchKeys = null;
+function applyMatchMask() {
+ if (!points || !matchKeys) return;
+ const attr = points.geometry.getAttribute('aMatch');
+ if (!attr) return;
+ const n = Math.min(attr.count, stations.length);
+ for (let i = 0; i < n; i++) {
+  const st = stations[i];
+  attr.array[i] = matchKeys.has(st.lat + '|' + st.lon + '|' + st.name) ? 1 : 0;
+ }
+ attr.needsUpdate = true;
+}
+function markMatches(list) {
+ if (!list) {
+  matchKeys = null;
+  matchTarget = 0;
+  if (points) {
+   const attr = points.geometry.getAttribute('aMatch');
+   if (attr) { attr.array.fill(1); attr.needsUpdate = true; }
+  }
+  return;
+ }
+ matchKeys = new Set(list.map(x => x.lat + '|' + x.lon + '|' + x.name));
+ applyMatchMask();
+ matchTarget = 1;
+}
 /* 选中标记：一条极细的亮环 + 一层缓慢呼吸的柔光，替代原先「粗环套粗环」的画法。
    环半径随相机距离等比缩放（见 animate），因此在任何缩放级别下屏幕尺寸恒定，
    贴近地表时不会膨胀成遮挡视野的大圆圈。 */
@@ -585,6 +638,40 @@ function markSelected(s) {
  earthGroup.add(selGroup);
  selGlowAt = performance.now();
 }
+/* ===== 首访引导（零文案）：让一颗可见绿点自己脉冲一次 =====
+   不用浮层卡片，避免遮挡地球；只做一次，用户任何操作都会由面板侧取消。 */
+let pulseSpr = null, pulseT0 = 0;
+const PULSE_MS = 640;
+function showDotPulse() {
+ if (!glowTex) glowTex = makeGlowTexture();
+ if (pulseSpr || !stations || !stations.length) return false;
+ const camDir = camera.position.clone().normalize();
+ const vis = [];
+ for (let i = 0; i < stations.length && vis.length < 60; i++) {
+  const s = stations[i];
+  if (!Number.isFinite(s.lat) || !Number.isFinite(s.lon)) continue;
+  if (geoToVec3(s.lat, s.lon, 1).dot(camDir) > 0.35) vis.push(s);
+ }
+ if (!vis.length) return false;
+ const s = vis[Math.floor(Math.random() * vis.length)];
+ const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+  map: glowTex, transparent: true, depthWrite: false, depthTest: true,
+  blending: THREE.AdditiveBlending, opacity: .9, toneMapped: false
+ }));
+ spr.position.copy(geoToVec3(s.lat, s.lon, 1.004));
+ spr.scale.setScalar(RING_BASE_R * 1.2);
+ spr.frustumCulled = false;
+ earthGroup.add(spr);
+ pulseSpr = spr; pulseT0 = performance.now();
+ return true;
+}
+function clearDotPulse() {
+ if (!pulseSpr) return;
+ earthGroup.remove(pulseSpr);
+ pulseSpr.material.dispose();
+ pulseSpr = null;
+}
+
 function clearSelection() {
  if (selGroup) {
   earthGroup.remove(selGroup);
@@ -1316,6 +1403,8 @@ controls.addEventListener('start', () => {
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
+  /* 抽屉打开期间窗口变化时要重新应用投影偏移，否则偏移会被 aspect 重算冲掉 */
+  if (viewOffsetX) setViewOffset(viewOffsetX);
   markerMat.uniforms.uDpr.value = ratio;
  }
  if (window.ResizeObserver) new ResizeObserver(resize).observe(host);
@@ -1360,6 +1449,16 @@ controls.addEventListener('start', () => {
   get audio() { return audio; },
   get tileState() { return { key: TILE.key, ready: !!(TILE.mesh && TILE.mesh.visible), failed: TILE.failed }; },
   get labels() { return labelLayer.children.filter(m => m.visible).length; },
+  __pulse: showDotPulse,
+  setViewOffset,
+  markMatches,
+  __mask: () => {
+   const a = points && points.geometry.getAttribute('aMatch');
+   let m = 0;
+   if (a) for (let i = 0; i < a.count; i++) if (a.array[i] > 0.5) m++;
+   return { now: +matchNow.toFixed(3), target: matchTarget, matched: m };
+  },
+  __cancelPulse: clearDotPulse,
   play: i => selectStation(typeof i === 'number' ? i : 0),
   playStation: s => {
    if (!s) return;
@@ -1461,6 +1560,17 @@ controls.addEventListener('start', () => {
  const idleText = () => stations.length + ' 个电台坐标点 · 点击绿点播放';
  function animate(t) {
   requestAnimationFrame(animate);
+  if (Math.abs(matchNow - matchTarget) > 0.002) {
+   matchNow += (matchTarget - matchNow) * 0.14;
+   markerMat.uniforms.uSearch.value = matchNow;
+  }
+  if (pulseSpr) {
+   const k = Math.min(1, (performance.now() - pulseT0) / PULSE_MS);
+   const e = 1 - Math.pow(1 - k, 2.2);
+   pulseSpr.scale.setScalar(RING_BASE_R * (1.2 + 3.4 * e));
+   pulseSpr.material.opacity = 0.85 * (1 - k);
+   if (k >= 1) clearDotPulse();
+  }
   fpsTick(t || performance.now());
   controls.update();
   /* 滚轮缩放缓动：朝目标距离线性逼近，末端收敛到 1e-3 以内再吸附 */

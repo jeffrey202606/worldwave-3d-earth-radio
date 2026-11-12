@@ -375,6 +375,129 @@ function preconnect(url) {
   document.head.appendChild(b);
  } catch (e) {}
 }
+/* ===== 电台详情抽屉（右侧 520px，规格见 design/WAVE-DECK-ROADMAP-DS.md 第 4 轮） =====
+   入口：卡片抽屉的「详情」、长按操作单、以及从 URL 带 st= 参数进入。
+   打开时左栏收起（<1600px）、地球飞向该台并把投影中心左移半个抽屉宽；
+   抽屉打开期间点其它绿点只切换内容，不再叠加历史记录。 */
+const SD = { open: false, s: null };
+let sdTimer = 0;
+const sdNode = id => document.getElementById(id);
+function renderStationDrawer(s) {
+ const host = sdNode('stDrawer');
+ if (!host || !s) return;
+ sdNode('sdTitle').textContent = s.name || '';
+ sdNode('sdTitle').title = s.name || '';
+ const on = isFav(s), favBtn = sdNode('sdFav');
+ favBtn.innerHTML = ICON[on ? 'starOn' : 'star'];
+ favBtn.classList.toggle('on', on);
+ favBtn.setAttribute('aria-label', on ? '取消收藏' : '收藏这台');
+ sdNode('sdShare').innerHTML = ICON.link;
+
+ /* 播放条：当前台显示真实状态，其它台显示「点击播放」 */
+ const isCur = current && same(current, s);
+ const playing = isCur && mode === 'playing';
+ const btn = sdNode('sdPlay');
+ btn.innerHTML = playing ? ICON.pause : ICON.play;
+ btn.setAttribute('aria-label', playing ? '暂停' : '播放');
+ sdNode('sdState').textContent = isCur
+  ? ({ playing: '正在播放', loading: '正在连接', paused: '已暂停', error: '播放失败' }[mode] || '')
+  : '点击播放';
+ const vol = sdNode('sdVol');
+ const E = window.WW_EARTH;
+ if (E && E.audio) vol.value = String(E.audio.volume);
+
+ /* 地理行：城市 / 分级 / 坐标 */
+ const geo = sdNode('sdGeo');
+ geo.innerHTML = '';
+ geo.appendChild(el('div', 'city', cityShort(s) || '—'));
+ if (s.cn && s.tier) geo.appendChild(el('div', 'tier', s.tier));
+ geo.appendChild(el('div', 'coord', s.lat.toFixed(2) + '°, ' + s.lon.toFixed(2) + '°'));
+
+ /* 主体：同址电台 + 流地址（没有的字段整块不渲染，不留空占位） */
+ const body = sdNode('sdBody');
+ body.innerHTML = '';
+ const alts = (Array.isArray(s.alts) ? s.alts : []).filter(a => a && a.stream);
+ if (alts.length) {
+  const head = el('div', 'sdsec-h', '同址电台');
+  head.appendChild(el('span', 'num', String(alts.length + 1)));
+  body.appendChild(head);
+  alts.forEach(a => {
+   const b = el('button', 'sddrow');
+   b.type = 'button';
+   b.setAttribute('aria-label', '播放同址电台 ' + (a.name || ''));
+   const lg = el('span', 'lg', (a.name || '?').trim().charAt(0).toUpperCase());
+   const bg = logoBg({ name: a.name || '', city: s.city });
+   if (bg) lg.style.background = bg;
+   b.appendChild(lg);
+   b.appendChild(el('span', 'nm', a.name || '备用流'));
+   const go = el('span', 'go');
+   go.innerHTML = ICON.play;
+   b.appendChild(go);
+   b.addEventListener('click', () => play(Object.assign({}, s, { name: a.name || s.name, stream: a.stream, alts: [] })));
+   body.appendChild(b);
+  });
+ }
+ const tech = el('div', 'sdtech', hostOf(s) || s.stream);
+ tech.title = '点击复制流地址';
+ tech.addEventListener('click', () => {
+  if (navigator.clipboard) navigator.clipboard.writeText(s.stream).then(() => toast('流地址已复制')).catch(() => toast(s.stream));
+  else toast(s.stream);
+ });
+ body.appendChild(tech);
+}
+function openStation(s) {
+ if (!s) return;
+ const host = sdNode('stDrawer');
+ if (!host) return;
+ const first = !SD.open;
+ SD.s = s;
+ renderStationDrawer(s);
+ clearTimeout(sdTimer);
+ if (first) {
+  host.hidden = false;
+  host.setAttribute('aria-hidden', 'false');
+  /* 记下左栏原本是否展开，关闭时还原 */
+  SD.leftWasOpen = document.body.dataset.left === '1';
+  if (window.innerWidth < 1600) setPanel('left', false, false);
+  host.classList.remove('out');
+  host.classList.add('on');
+  SD.open = true;
+  document.body.classList.add('sd-open');
+ }
+ const E = window.WW_EARTH;
+ if (E) {
+  /* 规格写的是 2.2，但 minDistance 是 2.42，会贴到只看见一片卫星贴图；
+     3.4 既能把该台推到前景，又保留「这是一颗星球」的空间感 */
+  E.flyTo(s.lat, s.lon, 4.4);
+  E.setViewOffset && E.setViewOffset(window.innerWidth >= 1100 ? 260 : 0);
+ }
+ try {
+  const u = new URL(location.href);
+  u.searchParams.set('st', s.lat.toFixed(4) + ',' + s.lon.toFixed(4));
+  history.replaceState(null, '', u.toString());
+ } catch (e) { /* file:// 下 replaceState 可能被拒 */ }
+}
+function closeStation() {
+ const host = sdNode('stDrawer');
+ if (!host || !SD.open) return;
+ host.classList.remove('on');
+ host.classList.add('out');
+ host.setAttribute('aria-hidden', 'true');
+ SD.open = false;
+ document.body.classList.remove('sd-open');
+ const E = window.WW_EARTH;
+ if (E && E.setViewOffset) E.setViewOffset(0);
+ try {
+  const u = new URL(location.href);
+  u.searchParams.delete('st');
+  history.replaceState(null, '', u.toString());
+ } catch (e) { /* noop */ }
+ if (SD.leftWasOpen && window.innerWidth < 1600) setPanel('left', true, true);
+ SD.leftWasOpen = false;
+ clearTimeout(sdTimer);
+ sdTimer = setTimeout(() => { if (!SD.open) { host.hidden = true; host.classList.remove('out'); } }, 280);
+}
+
 /* ---------- 触屏长按操作单 ---------- */
 let pressTimer = null, pressStart = null, sheetEl = null;
 function closeSheet() { if (sheetEl) { sheetEl.remove(); sheetEl = null; } }
@@ -391,6 +514,10 @@ function openSheet(s, x, y) {
    card.appendChild(b);
    return b;
   };
+  mk('查看详情').addEventListener('click', () => {
+   closeSheet();
+   openStation(s);
+  });
   mk('只定位，不播放').addEventListener('click', () => {
    closeSheet();
    window.WW_EARTH.flyTo(s.lat, s.lon, 3.15);
@@ -590,6 +717,7 @@ function row(o) {
     window.WW_EARTH.flyTo(s.lat, s.lon, 3.15);
     toast('已定位 · ' + s.name);
    });
+   mk('详情', 'panel', () => openStation(s));
    mk(isFav(s) ? '已收藏' : '收藏', isFav(s) ? 'starOn' : 'star', () => {
     if (isFav(s)) { fav = fav.filter(x => !same(x, s)); toast('已取消收藏'); }
     else { fav = [compact(s), ...fav].slice(0, 200); toast('已收藏 · ' + s.name); }
@@ -802,6 +930,7 @@ function renderL() {
   crumbs($('lCrumb'), L.stack, s => { L.stack = s; L.limit = 48; renderL(); });
   $('lBack').disabled = L.stack.length <= 1;
   mountFilters(top.v === 'root');
+  document.body.classList.toggle('view-discover', top.v === 'discover');
   renderNowStrip();
   body.innerHTML = '';
   /* 快照到位前 stations 只有 6 个预置点；此时显示骨架屏，避免统计条短暂出现错误数字 */
@@ -809,6 +938,7 @@ function renderL() {
   const f = document.createDocumentFragment();
   switch (top.v) {
    case 'root': renderRoot(f); break;
+   case 'discover': renderDiscover(f); break;
    case 'list': renderStationList(f, top); break;
   }
   body.appendChild(f);
@@ -817,6 +947,178 @@ function renderL() {
   $('lCount').textContent = fmt(stations.length) + ' 个点位';
   try { if (performance.mark) performance.mark('ww:first-cards'); } catch (e) {}
 }
+/* ===== 发现页（左栏视图栈里的一个节点）=====
+   三个区块：编辑精选（手写主题 + 横向卡片流）→ 小地方的声音（≤5 台的冷门城市，每日轮换）
+   → 收藏的城市足迹（收藏 ≥3 台才出现）。发现页不是筛选场景，进来后隐藏搜索与 chip。 */
+const CURATED = [
+ { t: '深夜爵士', d: '小号、贝斯和凌晨两点', s: ['Jazz24', 'JazzW3', 'TSFJazz', 'JAZZ CAFE'] },
+ { t: '古典时刻', d: '没有鼓点，只有呼吸', s: ['Classicnl', 'Classic Pan', 'LX Classics', 'RMF Classic'] },
+ { t: '电子脉冲', d: '合成器堆出来的夜', s: ['DnB&EDM', 'Dance FM', 'House FM', '1Dance.fm'] },
+ { t: '拉丁热浪', d: '从哈瓦那到布宜诺斯艾利斯', s: ['SalsaViva', 'ZonaSalsa', 'Salsa Latina', 'Tango Berlin'] },
+ { t: '雷鬼与海岛', d: '低音线永远慢半拍', s: ['Reggae Arte radio', 'Roots Rock Reggae Hawaii', 'Reggaeton 92.3 FM'] },
+ { t: '灵魂与放克', d: '采样源头的味道', s: ['Soul FM', 'Emsefunk', 'Soul Radio', 'Funky Radio'] },
+ { t: '环境与专注', d: '给键盘声留一条缝', s: ['Chillen', 'RelaxRO', 'Lounge FM', 'RT1 Relax'] },
+ { t: '摇滚现场', d: '失真、鼓皮和汗', s: ['100.3 K-Rock', '1310 AM Rock', '88.5 Rock FM', 'Bandit Metal'] },
+ { t: '世界音乐', d: '不属于任何一种语言', s: ['GoA World', 'Folk Radio', 'FolkyTon Radio', 'NRK Folkemusikk'] },
+ { t: '新闻与谈话', d: '有人在认真说话', s: ['Info RC', 'WRAL News+', 'BandNews BH', 'Talksport 2'] },
+ { t: '城市流行', d: '你昨天在便利店听过', s: ['Hit53', 'Hits 1', 'VoxPop', '1047hit'] },
+ { t: '老歌与留声机', d: '黑胶底噪比歌声响', s: ['retro', 'A-Z 70s', 'Cuba80s', 'Easy 80s'] }
+];
+let NAME_MAP = null;
+function curatedList() {
+ if (!NAME_MAP) {
+  NAME_MAP = new Map();
+  stations.forEach(x => { if (!NAME_MAP.has(x.name)) NAME_MAP.set(x.name, x); });
+ }
+ return CURATED.map(c => ({ t: c.t, d: c.d, items: c.s.map(n => NAME_MAP.get(n)).filter(Boolean) }))
+  .filter(c => c.items.length >= 3);
+}
+/* 小地方：城市电台数 1–5，日期种子洗牌后取 8 个，最近 7 天不重复 */
+const SMALL_KEY = 'ww.smallcity.v1';
+/* 数据里 city 字段常把州/省当城市写，这里挡掉最常见的行政区名 */
+const SMALL_BLOCK = new Set(('alabama alaska arizona arkansas california colorado connecticut delaware ' +
+ 'florida georgia hawaii idaho illinois indiana iowa kansas kentucky louisiana maine maryland ' +
+ 'massachusetts michigan minnesota mississippi missouri montana nebraska nevada ohio oklahoma oregon ' +
+ 'pennsylvania tennessee texas utah vermont virginia washington wisconsin wyoming ' +
+ 'ontario quebec alberta manitoba saskatchewan ' +
+ 'lombardy drenthe gelderland limburg bavaria hesse saxony thuringia ' +
+ 'central region northern region southern region eastern region western region').split(' '));
+function smallCities() {
+ const g = new Map();
+ stations.forEach(x => {
+  const head = String(x.city || '').split(',')[0].trim();
+  /* 太短（"PR" 这种州/国家缩写）或太长（整句地名）都不要 */
+  if (head.length < 3 || head.length > 16) return;
+  if (/^[A-Z]{2,3}$/.test(head)) return;
+  /* 「小地方」要的是城市，不是州/省/大区：常见行政区名直接排除 */
+  if (SMALL_BLOCK.has(head.toLowerCase())) return;
+  if (!g.has(head)) g.set(head, []);
+  g.get(head).push(x);
+ });
+ const pool = [];
+ /* 只有 1 个台的城市点进去就是一屏单条，太薄；2–5 台才是「小地方」的手感 */
+ g.forEach((arr, name) => { if (arr.length >= 2 && arr.length <= 5) pool.push({ name, items: arr }); });
+ pool.sort((a, b) => a.name.localeCompare(b.name));
+ const d = new Date();
+ const dayKey = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+ let rec = load(SMALL_KEY, {});
+ if (!rec || typeof rec !== 'object') rec = {};
+ if (rec.day === dayKey && Array.isArray(rec.cur) && rec.cur.length) {
+  const byName = new Map(pool.map(x => [x.name, x]));
+  const cur = rec.cur.map(n => byName.get(n)).filter(Boolean);
+  if (cur.length) return cur;
+ }
+ const seen = Array.isArray(rec.seen) ? rec.seen : [];
+ let seed = 2166136261;
+ for (let i = 0; i < dayKey.length; i++) { seed ^= dayKey.charCodeAt(i); seed = Math.imul(seed, 16777619); }
+ seed = Math.abs(seed) || 12345;
+ const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return seed / 4294967296; };
+ const arr = pool.slice();
+ for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); const t = arr[i]; arr[i] = arr[j]; arr[j] = t; }
+ let picked = arr.filter(x => seen.indexOf(x.name) < 0).slice(0, 8);
+ if (picked.length < 8) picked = arr.slice(0, 8);
+ save(SMALL_KEY, { day: dayKey, cur: picked.map(x => x.name), seen: seen.concat(picked.map(x => x.name)).slice(-56) });
+ return picked;
+}
+/* 收藏的城市足迹：取收藏最多的 3 个城市，各推 2 个没收藏过的健康台 */
+function favCityGroups() {
+ if (!fav || fav.length < 3) return [];
+ const cnt = new Map();
+ fav.forEach(f => {
+  const head = String(f.city || '').split(',')[0].trim();
+  if (!head) return;
+  cnt.set(head, (cnt.get(head) || 0) + 1);
+ });
+ const E = window.WW_EARTH;
+ return [...cnt.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([city]) => {
+  const all = stations.filter(x => String(x.city || '').split(',')[0].trim() === city);
+  const rest = all.filter(x => !isFav(x)).sort((a, b) => a.name.localeCompare(b.name));
+  const ok = rest.filter(x => !E || !E.healthOf || E.healthOf(x.stream) !== false);
+  return { city, total: all.length, items: (ok.length ? ok : rest).slice(0, 2) };
+ }).filter(g2 => g2.items.length);
+}
+function discHead(t, n) {
+ const h = el('div', 'disc-h', t);
+ h.appendChild(el('span', 'n', String(n)));
+ return h;
+}
+function cityView(name) {
+ const items = stations.filter(x => String(x.city || '').split(',')[0].trim() === name);
+ if (!items.length) return;
+ L.stack.push({ v: 'list', title: name, items });
+ L.limit = 48; renderL();
+ const E = window.WW_EARTH;
+ if (E) E.flyTo(items[0].lat, items[0].lon, 3.1);
+ toast(name + ' · ' + items.length + ' 个电台');
+}
+function renderDiscover(f) {
+ const wrap = el('div', 'discwrap');
+ /* ① 编辑精选 */
+ const cur = curatedList();
+ if (cur.length) {
+  wrap.appendChild(discHead('编辑精选', cur.length));
+  const cards = el('div', 'dscards');
+  cur.forEach(c => {
+   const b = el('button', 'dscard');
+   b.type = 'button';
+   b.appendChild(el('div', 't', c.t));
+   b.appendChild(el('div', 'd', c.d));
+   b.appendChild(el('div', 'c', c.items.length + ' 个电台'));
+   b.addEventListener('click', () => {
+    L.stack.push({ v: 'list', title: c.t, items: c.items });
+    L.limit = 48; renderL();
+   });
+   cards.appendChild(b);
+  });
+  wrap.appendChild(cards);
+ }
+ /* ② 小地方的声音 */
+ const small = smallCities();
+ if (small.length) {
+  wrap.appendChild(discHead('小地方的声音', small.length));
+  small.forEach(c => {
+   const b = el('button', 'dsrow');
+   b.type = 'button';
+   b.setAttribute('aria-label', c.name + '，' + c.items.length + ' 个电台');
+   const inner = el('span', 'wrap');
+   const line = el('span', 'c1');
+   line.appendChild(el('span', 'city', c.name));
+   line.appendChild(el('span', 'num', c.items.length + ' 台'));
+   inner.appendChild(line);
+   inner.appendChild(el('span', 'first', c.items[0].name));
+   b.appendChild(inner);
+   b.addEventListener('click', () => cityView(c.name));
+   wrap.appendChild(b);
+  });
+ }
+ /* ③ 收藏的城市足迹（收藏不足 3 台时整块不出现） */
+ const groups = favCityGroups();
+ if (groups.length) {
+  wrap.appendChild(discHead('收藏的城市足迹', groups.length));
+  groups.forEach(g2 => {
+   const box = el('div', 'dsgrp');
+   const h = el('div', 'dsgrp-h');
+   const cb = el('button', 'city', g2.city);
+   cb.type = 'button';
+   cb.addEventListener('click', () => cityView(g2.city));
+   h.appendChild(cb);
+   h.appendChild(el('span', 'num', g2.total + ' 台'));
+   box.appendChild(h);
+   g2.items.forEach(x => {
+    const b = el('button', 'dsst');
+    b.type = 'button';
+    b.setAttribute('aria-label', '播放 ' + x.name);
+    b.appendChild(el('span', 'nm', x.name));
+    const go = el('span', 'go'); go.innerHTML = ICON.play; b.appendChild(go);
+    b.addEventListener('click', () => { play(x); openStation(x); });
+    box.appendChild(b);
+   });
+   wrap.appendChild(box);
+  });
+ }
+ f.appendChild(wrap);
+}
+
 /* 根视图：分类标签（单步筛选）+ 扁平电台列表，去掉多层钻取。 */
 const CHIPS = [
   ['all', '全部'], ['cn', '中国'], ['亚洲', '亚洲'], ['欧洲', '欧洲'],
@@ -961,6 +1263,13 @@ function statLine() {
   st.appendChild(el('span', '', '中国'));
   w.appendChild(st);
   const tools = el('div', 'tools');
+  /* 「随机」用文字而不是图标：297px 里 14px 图标几乎看不见，文字按钮触屏也能点 */
+  const rnd = el('button', 'rnd', '随机');
+  rnd.type = 'button';
+  rnd.title = '随机听一台（N）';
+  rnd.setAttribute('aria-label', '随机听一台');
+  rnd.addEventListener('click', randomPlay);
+  tools.appendChild(rnd);
   tools.appendChild(sortBtn());
   tools.appendChild(viewSwitch());
   w.appendChild(tools);
@@ -1021,6 +1330,114 @@ function renderNowStrip() {
   }
   btn.setAttribute('aria-label', btn.title);
   host.appendChild(btn);
+}
+/* ---------- 每日坐标：每天一个值得飞过去的城市 ----------
+   数据里的 city 混着「城市」和「省/州」两种粒度，直接随机很容易抽到「内布拉斯加」这种读着很怪的结果。
+   所以用一份精选地名表去撞库，只有能匹配到 >=2 个电台的才进候选池，再由日期哈希决定当天是哪一个；
+   最近 12 天的结果记在 localStorage 里，避免短时间内重复。 */
+const DAILY_KEY = 'ww.daily.v1';
+const DAILY_CITIES = ['北京', '上海', '广州', '深圳', '厦门', '长沙', '青岛', '苏州', '郑州', '天津', '大连', '三亚',
+ '香港', '台北', 'Tokyo', 'Seoul', 'Bangkok', 'Singapore', 'Jakarta', 'Manila', 'Mumbai', 'Delhi', 'Kathmandu',
+ 'Dubai', 'Istanbul', 'Moscow', 'Berlin', 'Hamburg', 'London', 'Paris', 'Amsterdam', 'Barcelona', 'Madrid',
+ 'Lisbon', 'Rome', 'Milan', 'Vienna', 'Prague', 'Budapest', 'Stockholm', 'Oslo', 'Copenhagen', 'Helsinki',
+ 'Reykjavik', 'Dublin', 'Edinburgh', 'Athens', 'Cairo', 'Lagos', 'Nairobi', 'Cape Town', 'Tel Aviv', 'Tehran',
+ 'Colombo', 'New York', 'Chicago', 'Los Angeles', 'San Francisco', 'Seattle', 'Portland', 'Nashville',
+ 'New Orleans', 'Memphis', 'Detroit', 'Austin', 'Boston', 'Miami', 'Las Vegas', 'Honolulu', 'Mexico City',
+ 'Havana', 'Kingston', 'Bogota', 'Lima', 'Santiago', 'Buenos Aires', 'Sao Paulo', 'Rio de Janeiro',
+ 'Montevideo', 'Sydney', 'Melbourne', 'Auckland', 'Wellington'];
+let DAILY = null;
+function normCity(t) {
+  return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+}
+function medianNum(arr) {
+  const b = arr.slice().sort((x, y) => x - y), m = b.length >> 1;
+  return b.length % 2 ? b[m] : (b[m - 1] + b[m]) / 2;
+}
+function dailyPool() {
+  if (DAILY && DAILY.n === stations.length) return DAILY.pool;
+  const g = new Map();
+  stations.forEach(s => {
+    const head = String(s.city || '').split(',')[0].trim();
+    if (!head) return;
+    const k = normCity(head);
+    if (!g.has(k)) g.set(k, []);
+    g.get(k).push(s);
+  });
+  const pool = [];
+  DAILY_CITIES.forEach(name => {
+    const arr = g.get(normCity(name));
+    /* 2 个台在列表里只占两行，看起来像没加载完；3 个才有「发现感」 */
+    if (!arr || arr.length < 3) return;
+    /* 中位数坐标：个别站点经纬度明显跑偏时不会被带跑 */
+    pool.push({
+      name, count: arr.length, items: arr,
+      lat: medianNum(arr.map(x => x.lat)), lon: medianNum(arr.map(x => x.lon))
+    });
+  });
+  DAILY = { n: stations.length, pool, pick: null };
+  return pool;
+}
+function pickDaily() {
+  const pool = dailyPool();
+  if (!pool.length) return null;
+  const d = new Date();
+  const dayKey = d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+  let rec = load(DAILY_KEY, {});
+  if (!rec || typeof rec !== 'object') rec = {};
+  /* 同一天内重算 / 刷新页面都必须是同一座城：先把当天已记录的结果复用掉 */
+  if (rec.day === dayKey && rec.cur) {
+   const same0 = pool.filter(p => p.name === rec.cur)[0];
+   if (same0) { DAILY.pick = { day: dayKey, item: same0 }; return same0; }
+  }
+  let hist = Array.isArray(rec.hist) ? rec.hist : [];
+  if (hist.length > pool.length - 2) hist = [];
+  hist = hist.slice(-14);
+  /* count^0.3 加权：台多的城市稍占优（列表更丰富），但不至于变成「热门推荐」。
+     41 台 vs 4 台 = 3.02 vs 1.52 ≈ 2:1（sqrt 是 3.2:1，线性是 13:1）。 */
+  const weight = c => Math.pow(c, 0.3);
+  const total = pool.reduce((sum, p) => sum + weight(p.count), 0);
+  let seed = 2166136261;
+  for (let i = 0; i < dayKey.length; i++) { seed ^= dayKey.charCodeAt(i); seed = Math.imul(seed, 16777619); }
+  let item = null;
+  for (let attempt = 0; attempt < 8 && !item; attempt++) {
+   seed = (Math.imul(seed ^ (seed >>> 15), 2246822507) >>> 0) || 1;
+   let r = ((seed >>> 8) / 0xFFFFFF) * total;
+   for (let i = 0; i < pool.length; i++) {
+    r -= weight(pool[i].count);
+    if (r <= 0) { if (hist.indexOf(pool[i].name) < 0) item = pool[i]; break; }
+   }
+  }
+  if (!item) {
+   const rest = pool.filter(p => hist.indexOf(p.name) < 0);
+   item = rest.length ? rest[Math.abs(seed) % rest.length] : pool[Math.abs(seed) % pool.length];
+  }
+  save(DAILY_KEY, { day: dayKey, cur: item.name, hist: hist.concat(item.name).slice(-12) });
+  DAILY.pick = { day: dayKey, item };
+  return item;
+}
+function renderDaily() {
+  const host = $('lDaily');
+  if (!host) return;
+  /* 目录快照到位前 stations 只有 6 个预置点，此时算出来的城市没有意义 */
+  if (!stations || stations.length < 50) { host.hidden = true; return; }
+  const p = pickDaily();
+  if (!p) { host.hidden = true; return; }
+  host.hidden = false;
+  host.innerHTML = '';
+  host.appendChild(el('span', 'dlab', '今日坐标'));
+  host.appendChild(el('span', 'dname', p.name));
+  host.appendChild(el('span', 'dmeta', p.count + ' 个电台'));
+  host.appendChild(el('span', 'darw', '→'));
+  host.title = '飞往 ' + p.name + ' · ' + p.count + ' 个电台';
+  host.setAttribute('aria-label', '今日坐标：' + p.name + '，' + p.count + ' 个电台，点击飞往该城市并列出全部电台');
+  host.onclick = () => {
+    const E = window.WW_EARTH;
+    if (E) E.flyTo(p.lat, p.lon, 2.95);
+    L.stack = [{ v: 'root', title: '发现' }, { v: 'list', title: p.name, items: p.items.slice() }];
+    L.limit = 48; renderL();
+    if (document.body.dataset.left !== '1') setPanel('left', true, true);
+    toast('今日坐标 · ' + p.name + ' · ' + p.count + ' 个电台');
+  };
 }
 /* 右栏可折叠区块 */
 function fold(key, title, count, fill) {
@@ -1162,6 +1579,9 @@ function renderStationRows(f, list, title, side) {
   const st = $('rState');
   st.dataset.mode = mode;
   st.textContent = MODE_TXT[mode] || '就绪';
+  /* 右栏整体也带上播放态，供 EQ 透明度等纯 CSS 表现使用 */
+  const rp = $('rightPanel');
+  if (rp) rp.dataset.mode = mode;
  }
  function helpOverlay() {
   const old = $('wdHelp');
@@ -1200,7 +1620,26 @@ function renderStationRows(f, list, title, side) {
  };
  const EQ = Object.assign({ preset: 'flat', g: [0, 0, 0], real: false }, load(EQ_KEY, {}));
  if (!Array.isArray(EQ.g) || EQ.g.length !== 3) EQ.g = [0, 0, 0];
- const SLEEP = { deadline: 0, leftMin: 0, tick: null };
+ const SLEEP = { deadline: 0, leftMin: 0, tick: null, baseVol: null, fading: false };
+ /* iOS Safari 的 audio.volume 是只读的（赋值不生效），那里只能到点直接暂停 */
+ const VOL_LOCKED = (() => {
+  try { const a = new Audio(); a.volume = 0.5; return a.volume !== 0.5; } catch (e) { return false; }
+ })();
+ /* 睡前最后 60 秒把音量线性拉到 0，避免「到点硬静音」把人惊醒 */
+ const SLEEP_FADE_MS = 60000;
+ function sleepAudio() {
+  const E = window.WW_EARTH;
+  return (E && E.audio) ? E.audio : null;
+ }
+ /* 用户手动改音量时，静默退出渐弱：不覆盖用户的音量，但定时器继续走 */
+ function sleepStopFade() {
+  SLEEP.fading = false; SLEEP.baseVol = null;
+ }
+ function sleepRestoreVol() {
+  const a = sleepAudio();
+  if (a && SLEEP.baseVol != null) { try { a.volume = SLEEP.baseVol; } catch (e) { /* noop */ } }
+  SLEEP.baseVol = null; SLEEP.fading = false;
+ }
  let eqAudio = null;
  function saveEQ() { save(EQ_KEY, { preset: EQ.preset, g: EQ.g, real: EQ.real }); }
  function eqVizUpdate(root) {
@@ -1251,24 +1690,41 @@ function renderStationRows(f, list, title, side) {
  function startSleep(min) {
   SLEEP.deadline = Date.now() + min * 60000;
   SLEEP.leftMin = min;
+  SLEEP.fading = false;
   clearInterval(SLEEP.tick);
   SLEEP.tick = setInterval(() => {
    const left = SLEEP.deadline - Date.now();
    if (left <= 0) {
     clearInterval(SLEEP.tick); SLEEP.tick = null; SLEEP.deadline = 0;
     const E = window.WW_EARTH;
+    const a = sleepAudio();
+    if (a) { try { a.volume = 0; } catch (e) { /* noop */ } }
     if (E && E.audio && !E.audio.paused) E.togglePlay();
-    toast('睡眠定时已到 · 播放已暂停');
+    sleepRestoreVol();
+    toast('睡眠定时已到 · 已渐弱停止');
     renderR(); return;
    }
+   /* 最后 60 秒渐弱：每秒把音量按剩余时间比例压下去 */
+   if (left <= SLEEP_FADE_MS && !VOL_LOCKED) {
+    const a = sleepAudio();
+    if (a && !a.paused) {
+     if (SLEEP.baseVol == null) SLEEP.baseVol = a.volume || 1;
+     a.volume = Math.max(0, Math.round(SLEEP.baseVol * (left / SLEEP_FADE_MS) * 1000) / 1000);
+     if (!SLEEP.fading) { SLEEP.fading = true; toast('最后 1 分钟 · 音量渐弱'); }
+    }
+   }
    const b = document.querySelector('.sleepdisp b');
-   if (b) b.textContent = fmtSleep(left);
+   if (b) {
+    b.textContent = fmtSleep(left);
+    b.dataset.fade = left <= SLEEP_FADE_MS ? '1' : '';
+   }
   }, 1000);
   toast('睡眠定时 ' + min + ' 分钟');
   renderR();
  }
  function cancelSleep() {
   clearInterval(SLEEP.tick); SLEEP.tick = null; SLEEP.deadline = 0;
+  sleepRestoreVol();
   toast('已取消睡眠定时'); renderR();
  }
  function soundSection() {
@@ -1337,6 +1793,49 @@ function renderStationRows(f, list, title, side) {
    body.appendChild(panel);
    eqVizUpdate(panel);
   });
+ }
+
+ /* 播放失败兜底：候选流链全挂时，别只留一句「无法播放」。
+    按「同城 → 同流派 → 已知可播」排序给三条替代台，直接点就能听。 */
+ function rescueBlock() {
+  if (!current) return null;
+  const E = window.WW_EARTH;
+  const cat = catOf(current.name);
+  const cityK = x => String(x.city || '').split(',')[0].trim().toLowerCase();
+  const myCity = cityK(current);
+  const health = x => (E && E.healthOf ? E.healthOf(x.stream) : null);
+  const rows = stations
+   .filter(x => !same(x, current) && health(x) !== false)
+   .map(x => {
+    let sc = 0;
+    if (myCity && cityK(x) === myCity) sc -= 4;
+    if (cat && catOf(x.name) === cat) sc -= 2;
+    if (health(x) === true) sc -= 3;
+    return { x, sc };
+   })
+   .sort((a, b) => a.sc - b.sc)
+   .slice(0, 3)
+   .map(o => o.x);
+  if (!rows.length) return null;
+  const box = el('div', 'nrescue');
+  box.appendChild(el('div', 'nrescue-h', '这一台连不上，换一台试试'));
+  rows.forEach(s => {
+   const b = el('button', 'nrescue-row');
+   b.type = 'button';
+   b.setAttribute('aria-label', '播放 ' + s.name + '，' + cityShort(s));
+   const logo = el('span', 'nrescue-logo', (s.name || '?').trim().charAt(0).toUpperCase());
+   const bg = logoBg(s);
+   if (bg) logo.style.background = bg;
+   b.appendChild(logo);
+   const t = el('span', 'nrescue-t');
+   t.appendChild(el('span', 'n', s.name));
+   t.appendChild(el('span', 'm', cityShort(s) + (catOf(s.name) ? ' · ' + catOf(s.name) : '')));
+   b.appendChild(t);
+   b.appendChild(el('span', 'nrescue-go', '▶'));
+   b.addEventListener('click', () => play(s));
+   box.appendChild(b);
+  });
+  return box;
  }
 
  function renderNow(f) {
@@ -1416,10 +1915,13 @@ function renderStationRows(f, list, title, side) {
    if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => toast('链接已复制到剪贴板')).catch(() => toast(url));
    else toast(url);
   });
-  iconBtn('dice', '随机听一台', randomPlay);
   hero.appendChild(acts);
 
   f.appendChild(hero);
+  if (mode === 'error') {
+   const rescue = rescueBlock();
+   if (rescue) f.appendChild(rescue);
+  }
   f.appendChild(soundSection());
 
   /* ---------- 同址电台：可折叠（默认展开） ---------- */
@@ -1611,6 +2113,7 @@ function renderFeatures(f) {
   const volPct = el('span', 'volval', Math.round(E.audio.volume * 100) + '%');
   vol.value = String(E.audio.volume);
   vol.addEventListener('input', () => {
+   sleepStopFade();
    E.audio.volume = parseFloat(vol.value);
    volPct.textContent = Math.round(E.audio.volume * 100) + '%';
    const bottom = $('rVol'); if (bottom) bottom.value = vol.value;
@@ -1749,26 +2252,99 @@ function renderFeatures(f) {
   $('rightTab').addEventListener('click', () => setPanel('right', true, true));
   bindArrowNav('lBody');
   bindArrowNav('rBody');
-  let searchTimer = null;
+  let searchTimer = null, lastSearchFly = '', searchFlyAt = 0;
   $('lSearch').addEventListener('input', e => {
    clearTimeout(searchTimer);
    const q = e.target.value.trim();
    searchTimer = setTimeout(() => {
     if (!q) {
      if (L.stack[L.stack.length - 1].v === 'search') L.stack.pop();
-     renderL(); return;
+     renderL();
+     const E0 = window.WW_EARTH;
+     if (E0 && E0.markMatches) E0.markMatches(null);
+     lastSearchFly = '';
+     return;
     }
     const needle = q.toLowerCase();
     const items = rankList(stations.filter(s => (s.name + ' ' + s.city).toLowerCase().indexOf(needle) >= 0), needle).slice(0, 400);
     L.stack = [{ v: 'root', title: '发现' }, { v: 'list', title: '搜索', query: q, items }];
     L.limit = 60; renderL();
+    /* 搜索与地球联动：命中的点保持亮度、其余压到 0.15，并飞向首个结果。
+       同一个目标不重复起飞，避免每敲一个字地球都抖一下。 */
+    const E = window.WW_EARTH;
+    if (!E) return;
+    if (E.markMatches) E.markMatches(items);
+    if (items.length) {
+     const top = items[0], key = top.lat + '|' + top.lon + '|' + top.name;
+     if (key !== lastSearchFly && performance.now() - searchFlyAt > 700) {
+      lastSearchFly = key; searchFlyAt = performance.now();
+      E.flyTo(top.lat, top.lon, 3.0);
+     }
+    }
    }, 140);
   });
   $('lSearch').addEventListener('keydown', e => {
-   if (e.key === 'Escape') { e.target.value = ''; if (L.stack[L.stack.length - 1].v === 'search') L.stack.pop(); renderL(); e.target.blur(); }
+   if (e.key === 'Escape') {
+    e.target.value = '';
+    if (L.stack[L.stack.length - 1].v === 'search') L.stack.pop();
+    const E = window.WW_EARTH;
+    if (E && E.markMatches) E.markMatches(null);
+    lastSearchFly = '';
+    renderL(); e.target.blur();
+   }
+  });
+  /* 发现入口：搜索框右侧 ✦ */
+  const discBtn = $('lDiscover');
+  if (discBtn) discBtn.addEventListener('click', () => {
+   if (L.stack[L.stack.length - 1].v === 'discover') return;
+   if (document.body.dataset.left !== '1') setPanel('left', true, true);
+   L.stack = [{ v: 'root', title: '目录' }, { v: 'discover', title: '发现' }];
+   L.limit = 48; renderL();
+   const b = $('lBody'); if (b) b.scrollTop = 0;
+  });
+
+  /* 详情抽屉：返回 / 收藏 / 分享 / 播放 / 音量 */
+  const sdBack = sdNode('sdBack');
+  if (sdBack) sdBack.addEventListener('click', closeStation);
+  const sdFav = sdNode('sdFav');
+  if (sdFav) sdFav.addEventListener('click', () => {
+   const s0 = SD.s;
+   if (!s0) return;
+   if (isFav(s0)) { fav = fav.filter(x => !same(x, s0)); toast('已取消收藏'); }
+   else { fav = [compact(s0), ...fav].slice(0, 200); toast('已收藏 · ' + s0.name); }
+   save(KEY.fav, fav);
+   syncCounts();
+   renderStationDrawer(s0);
+   if (L.stack[L.stack.length - 1].v === 'root') renderL();
+   if (current && same(current, s0)) renderR();
+  });
+  const sdShare = sdNode('sdShare');
+  if (sdShare) sdShare.addEventListener('click', () => {
+   const s0 = SD.s;
+   if (!s0) return;
+   const url = location.href.split('#')[0].split('?')[0] + '?st=' + s0.lat.toFixed(4) + ',' + s0.lon.toFixed(4);
+   if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => toast('链接已复制')).catch(() => toast(url));
+   else toast(url);
+  });
+  const sdPlay = sdNode('sdPlay');
+  if (sdPlay) sdPlay.addEventListener('click', () => {
+   const s0 = SD.s;
+   if (!s0) return;
+   const E = window.WW_EARTH;
+   if (current && same(current, s0)) E.togglePlay();
+   else play(s0);
+  });
+  const sdVol = sdNode('sdVol');
+  if (sdVol) sdVol.addEventListener('input', () => {
+   sleepStopFade();
+   const E = window.WW_EARTH;
+   if (E && E.audio) E.audio.volume = parseFloat(sdVol.value);
+   const bottom = $('rVol'); if (bottom) bottom.value = sdVol.value;
   });
   window.addEventListener('ww:select', e => {
    current = e.detail.station;
+   /* 抽屉开着时，点地球上的其它绿点只切换内容，不关闭 */
+   if (SD.open && SD.s && !same(SD.s, current)) renderStationDrawer(current);
    his = [compact(current), ...his.filter(x => !same(x, current))].slice(0, 40);
    save(KEY.his, his);
    syncCounts();
@@ -1788,6 +2364,8 @@ function renderFeatures(f) {
    mode = e.detail.mode;
    const t = $('rState');
    if (t) { t.dataset.mode = mode; t.textContent = MODE_TXT[mode] || '就绪'; }
+   const rp = $('rightPanel');
+   if (rp) rp.dataset.mode = mode;
    /* 连接有结果（出声 / 失败 / 暂停）后收起进度条，卡片回到稳定态 */
    if (mode === 'playing' || mode === 'error' || mode === 'paused') {
     PENDING = null;
@@ -1800,10 +2378,27 @@ function renderFeatures(f) {
    }
    syncHeroMode();
    renderNowStrip();
+   if (SD.open && SD.s) renderStationDrawer(SD.s);
+   /* 失败态要重建右栏才能插入「试一试」推荐，其它状态只更新状态条即可 */
+   if (mode === 'error') renderR();
   });
   window.addEventListener('ww:catalog', () => {
    stations = window.WW_EARTH.stations;
-   rebuildIndex(); renderL(); renderR();
+   rebuildIndex(); renderL(); renderR(); renderDaily();
+   /* 深链：?st=lat,lon 直接打开对应电台的详情（分享出去的链接） */
+   if (!deepLinked) {
+    deepLinked = true;
+    try {
+     const st = new URL(location.href).searchParams.get('st');
+     if (st) {
+      const p2 = st.split(',').map(Number);
+      const near = stations
+       .filter(x => Math.abs(x.lat - p2[0]) < 0.05 && Math.abs(x.lon - p2[1]) < 0.05)
+       .sort((a, b) => (Math.abs(a.lat - p2[0]) + Math.abs(a.lon - p2[1])) - (Math.abs(b.lat - p2[0]) + Math.abs(b.lon - p2[1])))[0];
+      if (near) setTimeout(() => openStation(near), 60);
+     }
+    } catch (e) { /* noop */ }
+   }
   });
   /* 窗口尺寸变化会改变窄屏下的面板宽度，需同步 CSS 变量以免影响底部控制条宽度 */
   window.addEventListener('resize', () => {
@@ -1863,6 +2458,7 @@ function renderFeatures(f) {
     const h = $('wdHelp');
     if (h) { h.remove(); e.preventDefault(); }
     else if (sheetEl) { closeSheet(); e.preventDefault(); }
+    else if (SD.open) { closeStation(); e.preventDefault(); }
    }
   });
  }
@@ -1871,6 +2467,21 @@ function renderFeatures(f) {
    typeof s.stream === 'string' && s.stream.indexOf('https://') === 0 &&
    Math.abs(s.lat) <= 90 && Math.abs(s.lon) <= 180;
  }
+ /* 回归测试钩子：强制某播放态、读写睡眠定时，避免为了验证一个分支去等真实流失败 */
+ window.__wwDebug = {
+  mode(m) { mode = m; renderR(); },
+  sleep: {
+   start: startSleep, cancel: cancelSleep,
+   state: () => ({ left: SLEEP.deadline ? SLEEP.deadline - Date.now() : 0, baseVol: SLEEP.baseVol, fading: SLEEP.fading })
+  },
+  daily: () => pickDaily(),
+  sd: {
+   open: i => openStation(stations[typeof i === 'number' ? i : 0]),
+   close: closeStation,
+   state: () => ({ open: SD.open, name: SD.s && SD.s.name })
+  }
+ };
+ let deepLinked = false;
  function boot() {
   if (!window.WW_EARTH) return setTimeout(boot, 60);
   /* 触屏设备：hover 不可用，卡片右侧的「只定位」需要常驻，否则永远点不到 */
@@ -1885,7 +2496,44 @@ function renderFeatures(f) {
   const lv = localStorage.getItem(KEY.left), rv = localStorage.getItem(KEY.right);
   setPanel('left', lv === null ? !narrow : lv === '1', false);
   setPanel('right', rv === null ? !narrow : rv === '1', false);
-  bind(); renderL(); renderR();
+  bind(); renderL(); renderR(); renderDaily();
+  const rvEl = $('rVol');
+  if (rvEl) rvEl.addEventListener('input', sleepStopFade);
+  firstRunHint();
+ }
+
+/* ===== 首访引导：零文案，用地球自己的行为演示一次交互 =====
+   ① 800ms 后让一颗可见绿点脉冲一次（640ms）
+   ② 再等 300ms，搜索框边框呼吸两个周期（2.8s）
+   同一个会话只做一次；用户一旦拖拽 / 点击 / 按键，立刻取消，绝不抢操作。 */
+function firstRunHint() {
+  try {
+   if (sessionStorage.getItem('ww_hinted')) return;
+   sessionStorage.setItem('ww_hinted', '1');
+  } catch (e) { return; }
+  let t1 = 0, t2 = 0, t3 = 0, t4 = 0, t5 = 0;
+  const kill = () => {
+   clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4); clearTimeout(t5);
+   const E = window.WW_EARTH;
+   if (E && E.__cancelPulse) E.__cancelPulse();
+   document.body.classList.remove('hintbreath');
+   document.body.classList.remove('discover-hint');
+  };
+  ['pointerdown', 'keydown', 'wheel'].forEach(t =>
+   window.addEventListener(t, kill, { once: true, passive: true }));
+  t1 = setTimeout(() => {
+   const E = window.WW_EARTH;
+   if (E && E.__pulse) E.__pulse();
+  }, 800);
+  t2 = setTimeout(() => {
+   document.body.classList.add('hintbreath');
+   t3 = setTimeout(() => document.body.classList.remove('hintbreath'), 2900);
+  }, 800 + 640 + 300);
+  /* 发现图标排在最后：4.8s 才开始，不和前两个动效抢注意力 */
+  t4 = setTimeout(() => {
+   document.body.classList.add('discover-hint');
+   t5 = setTimeout(() => document.body.classList.remove('discover-hint'), 2900);
+  }, 4800);
  }
  boot();
 })();

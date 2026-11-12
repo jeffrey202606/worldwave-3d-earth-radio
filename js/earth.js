@@ -517,15 +517,18 @@ renderer.domElement.addEventListener('wheel', e => {
  }
  let stations = [], pointArray = null, points = null, selectedRing = null, ringMat = null;
  const markerMat = new THREE.ShaderMaterial({
-  uniforms: { uDpr: { value: 1 }, uSearch: { value: 0 } },
+  uniforms: { uDpr: { value: 1 }, uSearch: { value: 0 }, uOpenFilter: { value: 0 } },
   vertexShader: [
-   'attribute float aBig; attribute float aMatch;',
-   'uniform float uDpr; uniform float uSearch;',
+   'attribute float aBig; attribute float aMatch; attribute float aOpen;',
+   'uniform float uDpr; uniform float uSearch; uniform float uOpenFilter;',
    'varying float vA;',
    'void main(){',
    ' gl_PointSize=mix(3.0,6.4,aBig)*uDpr;',
    /* 搜索激活时：匹配点保持原亮度，其余压到 0.15 —— 只降不升，避免出现「发光」的错觉 */
-   ' vA=mix(1.0, mix(0.15,1.0,aMatch), uSearch);',
+   /* 营业过滤：当地凌晨的点压到 0.25，和搜索掩码可叠加 */
+   ' float a1=mix(1.0, mix(0.15,1.0,aMatch), uSearch);',
+   ' float a2=mix(1.0, mix(0.25,1.0,aOpen), uOpenFilter);',
+   ' vA=a1*a2;',
    ' gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);',
    '}'
   ].join('\n'),
@@ -554,13 +557,41 @@ renderer.domElement.addEventListener('wheel', e => {
   geo.setAttribute('aBig', new THREE.BufferAttribute(big, 1));
   /* aMatch：搜索命中掩码，默认全 1；只在搜索结果变化时整体重写一次 */
   geo.setAttribute('aMatch', new THREE.BufferAttribute(new Float32Array(n).fill(1), 1));
+  /* aOpen：营业时段掩码，默认全 1 */
+  geo.setAttribute('aOpen', new THREE.BufferAttribute(new Float32Array(n).fill(1), 1));
   points = new THREE.Points(geo, markerMat);
   points.renderOrder = 4;
   earthGroup.add(points);
   pointArray = arr; stations = list;
-  /* 点云重建后 aMatch 是全新数组，必须把当前搜索掩码重放一次，否则高亮会悄悄失效 */
+  /* 点云重建后属性是全新数组，两个掩码都要重放，否则筛选会悄悄失效 */
   if (matchKeys) applyMatchMask();
+  if (openFilterFn) applyOpenMask();
  }
+/* ===== 营业时段掩码（豆包 C1）=====
+   面板传入一个谓词（经度估算当地小时），这里写 aOpen 并同步拾取守卫。
+   传 null 表示关闭过滤。 */
+let openFilterFn = null;
+function applyOpenMask() {
+ if (!points || !openFilterFn) return;
+ const attr = points.geometry.getAttribute('aOpen');
+ if (!attr) return;
+ const n = Math.min(attr.count, stations.length);
+ for (let i = 0; i < n; i++) attr.array[i] = openFilterFn(stations[i]) ? 1 : 0;
+ attr.needsUpdate = true;
+}
+function setOpenOnly(fn) {
+ openFilterFn = typeof fn === 'function' ? fn : null;
+ if (!openFilterFn) {
+  markerMat.uniforms.uOpenFilter.value = 0;
+  if (points) {
+   const attr = points.geometry.getAttribute('aOpen');
+   if (attr) { attr.array.fill(1); attr.needsUpdate = true; }
+  }
+  return;
+ }
+ applyOpenMask();
+ markerMat.uniforms.uOpenFilter.value = 1;
+}
 /* ===== 搜索与地球联动 =====
    面板把命中的电台传进来，这里按「经纬度+台名」比对写 aMatch；
    uSearch 用 0→1 的缓动做淡入淡出，避免生硬跳变。传 null 表示清空搜索。 */
@@ -1092,6 +1123,8 @@ function ensureHint() {
  function selectStation(i) {
   const s = stations[i];
   if (!s) return;
+  /* 营业过滤开启时，凌晨时段的点只变暗、不参与拾取 */
+  if (openFilterFn && !openFilterFn(s)) return;
   /* 候选链：本台 → 同址其它台 → 同城台 → 最近台。公开流失效很常见，
      只挂在本台上会导致「点了没声音」，扩到附近后几乎总能出声。 */
   /* 本地等值判断：earth.js 里没有 panels 的 same()，之前直接调用会抛 ReferenceError，
@@ -1203,7 +1236,8 @@ function mark(name) {
 }
 function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
 function flyTo(lat, lon, d, opts) {
-  const dur = (opts && opts.dur) || 1150;
+  /* 豆包 B3：相机飞行统一 650ms，跨洲切换最多 900ms（在 panels 里显式给 dur） */
+  const dur = (opts && opts.dur) || 650;
   const toLen = Math.min(controls.maxDistance, Math.max(controls.minDistance, d || 3.15));
   if (toLen < 4.6) upgradeDay();
   const fromDir = camera.position.clone().normalize();
@@ -1452,6 +1486,13 @@ controls.addEventListener('start', () => {
   __pulse: showDotPulse,
   setViewOffset,
   markMatches,
+  setOpenOnly,
+  __openMask: () => {
+   const a = points && points.geometry.getAttribute('aOpen');
+   let m = 0;
+   if (a) for (let i = 0; i < a.count; i++) if (a.array[i] > 0.5) m++;
+   return { active: !!openFilterFn, open: m };
+  },
   __mask: () => {
    const a = points && points.geometry.getAttribute('aMatch');
    let m = 0;

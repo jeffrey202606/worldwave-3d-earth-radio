@@ -11,7 +11,10 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; media-src https: blob:; connect-src 'self' https:; font-src 'self' data:; object-src 'none'; base-uri 'self'">
   <script type="importmap">{"imports":{"three":"./vendor/three.module.js"}}</script>
   <style>
-    :root{--lw:0px;--rw:0px}
+    :root{--lw:0px;--rw:0px;
+      /* 豆包 B3：全局只保留两套曲线 / 两个时长，杜绝机械匀速感 */
+      --ease-in:cubic-bezier(.22,1,.36,1);--ease-out:cubic-bezier(.4,0,1,1);
+      --dur-in:240ms;--dur-out:180ms}
     html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:#02050c;color:#e6f4ff}
     #earth{position:fixed;inset:0;width:100vw;height:100vh;cursor:grab;touch-action:none;outline:none}
     #earth:active{cursor:grabbing}
@@ -62,12 +65,18 @@
 
     /* ===== 两侧电台面板 ===== */
     .panel{position:fixed;top:0;bottom:0;width:296px;z-index:8;display:flex;flex-direction:column;
-      background:linear-gradient(180deg,rgba(8,16,26,.965),rgba(5,12,20,.97));
-      backdrop-filter:blur(22px) saturate(115%);-webkit-backdrop-filter:blur(22px) saturate(115%);
-      box-shadow:0 0 40px rgba(0,0,0,.45);transition:transform .3s ease;color:rgba(228,244,255,.9);
+      /* 豆包 B1：背景压低不透明度、提高 blur，避免「贴了磨砂塑料膜」的厚塑料感；
+         没有砍到 0.08 —— 3D 地球是亮贴图，过低会让文字完全不可读 */
+      background:linear-gradient(180deg,rgba(8,16,26,.90),rgba(5,12,20,.92));
+      backdrop-filter:blur(28px) saturate(120%);-webkit-backdrop-filter:blur(28px) saturate(120%);
+      box-shadow:0 0 40px rgba(0,0,0,.45);transition:transform var(--dur-in) var(--ease-in);color:rgba(228,244,255,.9);
       font:12px/1.45 "PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+    /* 收起用退场曲线，展开用入场曲线 */
+    #leftPanel,#rightPanel{border-top:1px solid rgba(255,255,255,.07)}
+    body[data-left="0"] #leftPanel,body[data-right="0"] #rightPanel{transition:transform var(--dur-out) var(--ease-out)}
+    /* 左上角播放器已按用户截图改到右上角：竖向卡片，圆形唱片在上 */
     #leftPanel{left:0;border-right:1px solid rgba(120,220,180,.16)}
-    #rightPanel{right:0;border-left:1px solid rgba(120,220,180,.16)}
+    #bar{display:none}
     body[data-left="0"] #leftPanel{transform:translateX(-100%)}
     body[data-right="0"] #rightPanel{transform:translateX(100%)}
     .phead{display:flex;align-items:center;gap:6px;padding:12px 10px 8px;flex:none;
@@ -260,19 +269,44 @@
     .chip.on{background:linear-gradient(180deg,rgba(117,191,64,.32),rgba(117,191,64,.16));
       border-color:rgba(117,191,64,.55);color:#d6f3b4;font-weight:600;
       box-shadow:0 2px 10px rgba(117,191,64,.18)}
+    /* A1：首屏只露 6 个地区 chip，其余 11 个折叠成「+11」；
+       display:contents 让展开后的 chip 直接参与 .chips 的 flex 排版 */
+    .chipmore{display:contents}
+    .chipmore-btn{flex:none;min-width:40px;height:28px;padding:0 8px;border-radius:14px;
+      border:1px dashed rgba(150,200,220,.26);background:rgba(255,255,255,.03);
+      color:rgba(190,222,240,.72);font:10.5px/1 inherit;cursor:pointer;
+      transition:background .15s,border-color .15s,color .15s}
+    .chipmore-btn:hover{background:rgba(90,160,200,.18);border-color:rgba(140,210,170,.34);color:#eaf7ff}
+    .chip.openchip{border-color:rgba(117,191,64,.28);color:rgba(214,243,180,.82)}
+    .chip.openchip.on{background:linear-gradient(180deg,rgba(117,191,64,.28),rgba(117,191,64,.13));
+      border-color:rgba(117,191,64,.52);color:#ddf5c0}
+    /* A3：常驻视图 Tab（目录 / 发现），选中态底部 2px 主题色下划线 */
+    .ptabs{display:flex;flex:none;align-items:stretch;gap:24px;height:28px;padding:0 10px;
+      border-bottom:1px solid rgba(150,200,220,.10)}
+    .ptab2{position:relative;border:0;background:transparent;padding:0;cursor:pointer;
+      font:12.5px/1 inherit;color:rgba(190,220,235,.55);letter-spacing:.02em}
+    .ptab2.on{color:rgba(235,248,255,.95);font-weight:600}
+    .ptab2.on::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:2px;
+      background:linear-gradient(90deg,#a5e874,#5aa32c)}
+    .ptab2:focus-visible{outline:2px solid rgba(165,232,116,.7);outline-offset:3px}
+    /* 视图切换：内容区 x 偏移 16px 淡入，200ms ease-out */
+    #lBody.viewin{animation:viewIn 200ms var(--ease-in) both}
+    @keyframes viewIn{from{opacity:.72;transform:translateX(16px)}to{opacity:1;transform:none}}
+    @media (prefers-reduced-motion:reduce){#lBody.viewin{animation:none}}
 
     /* ===== 电台卡片（重设计：徽标 / 双行文本 / 浮层操作） ===== */
     .prow.acard{position:relative;align-items:center;gap:9px;min-height:56px;
       padding:8px 9px;margin-bottom:6px;
-      border-radius:15px;border:1px solid rgba(255,255,255,.065);
+      /* B1：取消全边白描边，改成「顶部受光 / 底部阴影」的物理层次；圆角收敛到 10px */
+      border-radius:10px;border:1px solid rgba(255,255,255,.04);
       background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.016));
-      box-shadow:0 1px 0 rgba(255,255,255,.055) inset,0 1px 2px rgba(0,0,0,.16);
-      overflow:hidden;transition:transform .16s ease,border-color .16s,box-shadow .16s,background .18s}
+      box-shadow:0 1px 0 rgba(255,255,255,.075) inset,0 -1px 0 rgba(0,0,0,.20) inset,0 1px 2px rgba(0,0,0,.16);
+      overflow:hidden;transition:transform var(--dur-out) var(--ease-out),border-color .16s,box-shadow .16s,background .18s}
     .prow.acard::before{content:'';position:absolute;left:0;top:13px;bottom:13px;width:3px;border-radius:0 3px 3px 0;
       background:transparent;transition:background .2s,box-shadow .2s}
-    .prow.acard:hover{transform:translateY(-1.5px);border-color:rgba(255,255,255,.135);
+    .prow.acard:hover{transform:translateY(-1px);border-color:rgba(255,255,255,.10);
       background:linear-gradient(180deg,rgba(255,255,255,.085),rgba(255,255,255,.03));
-      box-shadow:0 8px 22px rgba(0,0,0,.30),0 1px 0 rgba(255,255,255,.08) inset}
+      box-shadow:0 4px 14px rgba(0,0,0,.24),0 1px 0 rgba(255,255,255,.08) inset}
     .prow.acard:active{transform:translateY(0)}
     /* 键盘焦点：用品牌绿描边并外扩 2px，不改变卡片尺寸，避免列表跳动 */
     .prow.acard:focus-visible{outline:2px solid rgba(165,232,116,.75);outline-offset:2px;
@@ -328,11 +362,12 @@
     @keyframes shIn{from{opacity:0}to{opacity:1}}
     @keyframes shCard{from{opacity:0;transform:scale(.97)}to{opacity:1;transform:none}}
     .alogo{flex:none;width:36px;height:36px;border-radius:11px;display:inline-flex;align-items:center;justify-content:center;
-      font-size:14.5px;font-weight:700;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4);
+      font-size:14.5px;font-weight:600;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4);
       border:1px solid rgba(255,255,255,.17);
       box-shadow:0 2px 7px rgba(0,0,0,.28),0 1px 0 rgba(255,255,255,.32) inset;letter-spacing:0;
       transition:box-shadow .2s,transform .18s}
-    .prow.acard:hover .alogo{transform:scale(1.035)}
+    /* B3：禁止 hover 缩放（>1.02 的缩放是廉价动效的典型特征） */
+    .prow.acard:hover .alogo{transform:none}
     .g-as{background:linear-gradient(145deg,#e7bd76,#c98f3c)}
     .g-eu{background:linear-gradient(145deg,#9fd2ee,#5b9ec9)}
     .g-af{background:linear-gradient(145deg,#e8a079,#c2703f)}
@@ -345,7 +380,7 @@
     .prow.acard .pmain{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0;padding-right:26px}
     .prow.acard .pnamerow{display:flex;align-items:center;gap:4px;min-width:0}
     .prow.acard .pnamerow .pname{min-width:0;flex:0 1 auto}
-    .prow.acard .pname{display:block;font-size:13.5px;font-weight:600;line-height:1.26;
+    .prow.acard .pname{display:block;font-size:14px;font-weight:600;line-height:1.45;
       color:rgba(246,251,255,.97);letter-spacing:-.005em;
       overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
     .prow.acard .pmeta{display:flex;align-items:center;gap:5px;min-width:0;
@@ -560,8 +595,8 @@
       transform:translateX(100%)}
     /* 进出场用 animation + fill-mode both，而不是 transition：
        transition 在低帧率/无合成器环境里会卡在起始帧（实测 transform 一直是 521px）。 */
-    .sdrawer.on{animation:sdIn 320ms cubic-bezier(.2,0,0,1) both}
-    .sdrawer.out{animation:sdOut 240ms cubic-bezier(.4,0,1,1) both}
+    .sdrawer.on{animation:sdIn var(--dur-in) var(--ease-in) both}
+    .sdrawer.out{animation:sdOut var(--dur-out) var(--ease-out) both}
     @keyframes sdIn{from{transform:translateX(100%)}to{transform:translateX(0)}}
     @keyframes sdOut{from{transform:translateX(0)}to{transform:translateX(100%)}}
     .sdrawer[hidden]{display:none}
@@ -722,13 +757,44 @@
     body.view-discover .psearch,body.view-discover .pfilters,body.view-discover .ldaily{display:none}
     /* 发现页：区块 + 横向卡片流 */
     .discwrap{padding:0 0 20px}
-    .disc-h{display:flex;align-items:center;height:32px;padding:0 10px;
-      font-size:12.5px;font-weight:500;color:rgba(200,226,242,.6)}
-    .disc-h .n{margin-left:auto;font-size:10px;color:rgba(184,212,230,.4)}
-    .dscards{display:flex;gap:10px;overflow-x:auto;padding:0 10px 4px;scroll-snap-type:x mandatory;
+    /* D3：区块数字是补充信息，不是标题 —— 12px/300/55%，与标题基线对齐、间距 8px */
+    .disc-h{display:flex;align-items:baseline;height:32px;padding:0 10px;
+      font-size:14px;font-weight:600;color:rgba(220,240,252,.9)}
+    .disc-h .n{margin-left:8px;font-size:12px;font-weight:300;line-height:1.4;
+      color:rgba(184,212,230,.55);font-variant-numeric:tabular-nums}
+    /* D2：横向卡片流的左右箭头，仅在内容溢出时出现 */
+    .dswrap{position:relative}
+    .dscards{display:flex;gap:10px;overflow-x:auto;padding:0 34px 4px;scroll-snap-type:x mandatory;
+      scroll-padding-left:34px;scroll-padding-right:34px;
       scrollbar-width:none}
     .dscards::-webkit-scrollbar{display:none}
-    .dscard{flex:none;width:170px;height:92px;border-radius:12px;padding:12px;text-align:left;
+    .dsnav{position:absolute;top:50%;transform:translateY(-50%);z-index:3;
+      width:32px;height:32px;padding:0;border-radius:8px;display:none;
+      align-items:center;justify-content:center;font-size:19px;line-height:1;cursor:pointer;
+      color:rgba(235,248,255,.9);background:rgba(18,24,32,.82);
+      border:1px solid rgba(255,255,255,.12);
+      backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+      box-shadow:0 3px 12px rgba(0,0,0,.35);
+      transition:background .15s,border-color .15s,opacity .15s}
+    /* 两侧渐隐：滚动时卡片从箭头下方淡出，避免生硬压字 */
+    .dswrap.cannav::before,.dswrap.cannav::after{content:'';position:absolute;top:0;bottom:4px;
+      width:36px;z-index:2;pointer-events:none}
+    .dswrap.cannav::before{left:0;background:linear-gradient(90deg,rgba(8,16,26,.98),rgba(8,16,26,0))}
+    .dswrap.cannav::after{right:0;background:linear-gradient(270deg,rgba(8,16,26,.98),rgba(8,16,26,0))}
+    /* 外凸 -8px 会被 .pbody 的 overflow:auto 裁掉，改为内收 2px 落在留白槽里 */
+    .dsnav.prev{left:2px}
+    .dsnav.next{right:2px}
+    .dswrap.cannav .dsnav{display:flex}
+    .dsnav:hover{background:rgba(60,120,170,.55);border-color:rgba(170,225,255,.4)}
+    .dsnav:disabled{opacity:.3;cursor:default}
+    .dsback{position:sticky;bottom:0;width:100%;height:40px;margin-top:14px;
+      border:1px solid rgba(150,200,220,.16);border-radius:9px;cursor:pointer;
+      background:rgba(12,20,30,.92);backdrop-filter:blur(12px);
+      -webkit-backdrop-filter:blur(12px);color:rgba(210,236,250,.82);
+      font:12px/1 inherit;letter-spacing:.02em;
+      transition:background .15s,color .15s}
+    .dsback:hover{background:rgba(60,120,170,.28);color:#eaf7ff}
+    .dscard{flex:none;width:170px;height:92px;border-radius:8px;padding:12px;text-align:left;
       border:1px solid rgba(255,255,255,.07);background:rgba(255,255,255,.04);cursor:pointer;
       color:inherit;font:inherit;display:flex;flex-direction:column;scroll-snap-align:start;
       transition:background .15s,border-color .15s}
@@ -743,12 +809,12 @@
     .dsrow:hover{background:rgba(255,255,255,.04)}
     .dsrow .wrap{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
     .dsrow .c1{display:flex;align-items:baseline;gap:8px}
-    .dsrow .city{font-size:13px;font-weight:500;color:rgba(232,246,255,.92);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .dsrow .city{font-size:13px;font-weight:400;color:rgba(232,246,255,.92);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .dsrow .num{margin-left:auto;flex:none;font-size:11px;color:rgba(184,212,230,.45);font-variant-numeric:tabular-nums}
     .dsrow .first{font-size:11px;color:rgba(184,212,230,.35);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .dsgrp{padding:0 0 2px}
     .dsgrp-h{display:flex;align-items:center;height:28px;padding:0 10px;gap:8px}
-    .dsgrp-h .city{font-size:12.5px;font-weight:500;color:rgba(226,242,252,.86);cursor:pointer;
+    .dsgrp-h .city{font-size:12.5px;font-weight:400;color:rgba(226,242,252,.86);cursor:pointer;
       background:none;border:0;padding:0;font-family:inherit}
     .dsgrp-h .city:hover{color:#fff;text-decoration:underline}
     .dsgrp-h .num{margin-left:auto;font-size:10px;color:rgba(184,212,230,.4)}
@@ -969,6 +1035,206 @@
     .prow.acard.dead .pname{opacity:.7}
     .prow.acard.dead .alogo{filter:grayscale(.7);opacity:.7}
 
+    /* ===== 右上角一体化播放器 =====
+       按用户红框：right 16 / top 36、280×355 竖向卡片，圆形唱片置顶居中。
+       右栏卡片移除后，这里是唯一的播放入口。 */
+    .wwpl{position:fixed;right:16px;top:36px;width:280px;height:355px;z-index:30;border-radius:18px;
+      box-sizing:border-box;display:flex;flex-direction:column;border:1px solid transparent;overflow:hidden;
+      background:linear-gradient(180deg,rgba(20,28,40,.93),rgba(9,15,24,.95)) padding-box,
+        linear-gradient(135deg,rgba(165,232,116,.5),rgba(90,180,220,.16) 46%,rgba(255,255,255,.05)) border-box;
+      backdrop-filter:blur(24px) saturate(130%);-webkit-backdrop-filter:blur(24px) saturate(130%);
+      box-shadow:0 18px 44px rgba(0,0,0,.46),inset 0 1px 0 rgba(255,255,255,.09);
+      color:rgba(232,246,255,.92);font:12px/1.45 inherit}
+    /* 不给 height 加过渡：Chromium 无法在 355px 与 min()/calc() 数学表达式之间插值，
+       会把过渡卡在起始值，导致展开面板永远不长大。面板自身的 plPanelIn 已提供入场动效。 */
+    .wwpl.open{height:min(660px,calc(100vh - 56px))}
+    /* 缓慢旋转的极光光晕，只在有内容时轻微呼吸 */
+    .wwpl-aura{position:absolute;left:-40%;top:-160%;width:180%;height:320%;pointer-events:none;
+      background:conic-gradient(from 0deg,rgba(124,201,79,.16),rgba(70,150,210,.10),rgba(0,0,0,0) 62%,rgba(124,201,79,.12));
+      filter:blur(28px);opacity:.55;animation:plAura 18s linear infinite}
+    @keyframes plAura{to{transform:rotate(360deg)}}
+    /* 竖版主区：唱片 → 台名/状态 → 频谱 → 按钮，均等分布填满卡片 */
+    .wwpl-main{position:relative;flex:1;min-height:0;display:flex;flex-direction:column;
+      align-items:center;justify-content:space-evenly;gap:0;padding:14px 16px 12px;box-sizing:border-box}
+    .wwpl.open .wwpl-main{flex:none;justify-content:flex-start;gap:10px;padding:12px 14px 10px}
+    /* 黑胶唱片：播放时旋转，暂停时定格；图标反向自转保持正立 */
+    .wwpl-disc{position:relative;flex:none;width:150px;height:150px;border-radius:50%;padding:0;border:0;cursor:pointer;
+      background:repeating-radial-gradient(circle at 50% 50%,#111820 0 2px,#0a1017 2px 3px,#151d27 3px 4px);
+      box-shadow:0 0 0 1px rgba(255,255,255,.10),0 10px 30px rgba(0,0,0,.55),0 0 30px rgba(124,201,79,.08);
+      animation:plSpin 5.5s linear infinite;animation-play-state:paused}
+    .wwpl.open .wwpl-disc{width:96px;height:96px}
+    .wwpl[data-mode="playing"] .wwpl-disc,
+    .wwpl[data-mode="loading"] .wwpl-disc{animation-play-state:running}
+    @keyframes plSpin{to{transform:rotate(360deg)}}
+    .wwpl-disc-ring{position:absolute;inset:7%;border-radius:50%;border:1px solid rgba(165,232,116,.20);
+      box-shadow:inset 0 0 0 1px rgba(255,255,255,.04),inset 0 0 26px rgba(124,201,79,.07)}
+    .wwpl-disc-core{position:absolute;inset:29%;border-radius:50%;
+      background:radial-gradient(circle at 35% 30%,#c8f39e,#75bf40 55%,#2f6d1c);
+      box-shadow:0 0 22px rgba(124,201,79,.45)}
+    .wwpl-disc-ico{position:absolute;inset:39%;display:flex;align-items:center;justify-content:center;color:#12200c;
+      animation:plSpin 5.5s linear infinite reverse;animation-play-state:paused}
+    .wwpl[data-mode="playing"] .wwpl-disc-ico,
+    .wwpl[data-mode="loading"] .wwpl-disc-ico{animation-play-state:running}
+    .wwpl-disc-ico svg{width:100%;height:100%}
+    .wwpl-txt{position:relative;flex:none;width:100%;text-align:center}
+    .wwpl-name{font-size:16px;font-weight:600;line-height:1.4;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+      background:linear-gradient(90deg,#f2fbff,#b9e6a0);-webkit-background-clip:text;background-clip:text;color:transparent}
+    .wwpl-sub{display:flex;align-items:center;justify-content:center;gap:6px;font-size:10.5px;color:rgba(184,212,230,.6);
+      white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .wwpl-sub i{flex:none;width:3px;height:3px;border-radius:50%;background:rgba(184,212,230,.4)}
+    .wwpl-sub span:last-child{overflow:hidden;text-overflow:ellipsis}
+    .wwpl[data-mode="playing"] #plState{color:#b7e890}
+    .wwpl[data-mode="error"] #plState{color:#ffb86b}
+    /* 频谱：播放时律动，暂停时静止 */
+    .wwpl-eqviz{position:relative;flex:none;display:flex;align-items:flex-end;justify-content:center;
+      gap:4px;height:22px;width:100%;opacity:.5}
+    .wwpl .wwpl-eqviz i{width:5px;height:var(--h,9px);border-radius:2px;
+      background:linear-gradient(180deg,#b7e890,#4f9b2a);
+      animation:plEq .8s ease-in-out infinite alternate;animation-delay:var(--d,0s);animation-play-state:paused}
+    .wwpl[data-mode="playing"] .wwpl-eqviz{opacity:1}
+    .wwpl[data-mode="playing"] .wwpl-eqviz i{animation-play-state:running}
+    @keyframes plEq{from{transform:scaleY(.42)}to{transform:scaleY(1.18)}}
+    /* 连接中也保持律动，避免「点了播放却像没反应」的空窗 */
+    .wwpl[data-mode="loading"] .wwpl-eqviz{opacity:1}
+    .wwpl[data-mode="loading"] .wwpl-eqviz i,
+    .wwpl[data-mode="loading"] .eqviz i{animation-play-state:running}
+    .wwpl-btns{position:relative;display:flex;align-items:center;justify-content:center;gap:10px;flex:none;width:100%}
+    .wwpl-b{width:30px;height:30px;padding:0;border-radius:9px;display:flex;align-items:center;justify-content:center;
+      border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.045);color:rgba(222,240,252,.78);
+      cursor:pointer;font:14px/1 inherit;transition:background .15s,border-color .15s,color .15s,transform .12s}
+    .wwpl-b:hover{background:rgba(90,160,200,.24);border-color:rgba(160,215,240,.36);color:#fff}
+    .wwpl-b:active{transform:translateY(1px)}
+    .wwpl-b svg{width:16px;height:16px}
+    .wwpl-b.primary{width:42px;height:42px;border-radius:50%;color:#10200a;
+      background:linear-gradient(160deg,#c8f39e,#75bf40 60%,#4f9b2a);border-color:rgba(200,243,158,.7);
+      box-shadow:0 0 0 4px rgba(124,201,79,.10),0 4px 14px rgba(124,201,79,.28)}
+    .wwpl-b.primary:hover{background:linear-gradient(160deg,#dcffb8,#8ad455 60%,#5aaf30);color:#10200a}
+    .wwpl-b.primary svg{width:20px;height:20px}
+    .wwpl[data-mode="playing"] .wwpl-b.primary{animation:plGlow 2.2s ease-in-out infinite}
+    @keyframes plGlow{50%{box-shadow:0 0 0 7px rgba(124,201,79,.14),0 6px 20px rgba(124,201,79,.42)}}
+    .wwpl-b.more{font-size:17px;line-height:1}
+    .wwpl.open .wwpl-b.more{transform:rotate(180deg)}
+    /* 底部流动光带 */
+    .wwpl-track{position:relative;flex:none;height:2px;background:rgba(255,255,255,.05);overflow:hidden}
+    .wwpl-track span{position:absolute;top:0;left:-45%;width:45%;height:100%;
+      background:linear-gradient(90deg,transparent,#a5e874,rgba(120,200,230,.8),transparent);
+      animation:plSweep 3.4s linear infinite}
+    @keyframes plSweep{to{left:100%}}
+    /* 展开的多功能面板：吃掉剩余高度，内部滚动，不再顶出卡片 */
+    .wwpl-panel{position:relative;flex:1;min-height:0;padding:10px 12px 14px;border-top:1px solid rgba(255,255,255,.07);
+      animation:plPanelIn var(--dur-in) var(--ease-in) both;overflow:auto;overscroll-behavior:contain}
+    @keyframes plPanelIn{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+    .plrow{margin-bottom:10px}
+    .plrow-t{display:flex;align-items:center;justify-content:space-between;font-size:10px;
+      letter-spacing:.08em;color:rgba(176,210,228,.55);margin-bottom:6px}
+    .plrow-t b{font-size:11px;font-weight:400;color:rgba(220,240,252,.82);font-variant-numeric:tabular-nums}
+    .plchips{display:flex;flex-wrap:wrap;gap:5px}
+    .plchip{flex:none;padding:5px 9px;border-radius:8px;cursor:pointer;font:10.5px/1 inherit;
+      border:1px solid rgba(150,200,220,.18);background:rgba(255,255,255,.035);color:rgba(214,236,248,.76);
+      transition:background .15s,border-color .15s,color .15s}
+    .plchip:hover{background:rgba(90,160,200,.22);color:#fff}
+    .plchip.on{background:linear-gradient(180deg,rgba(124,201,79,.30),rgba(124,201,79,.13));
+      border-color:rgba(124,201,79,.55);color:#dcf5c2}
+    .plchip svg{width:13px;height:13px;vertical-align:-2px;margin-right:3px}
+    .plvol{display:flex;align-items:center;gap:8px}
+    .plvol input{flex:1;accent-color:#a5e874;cursor:pointer}
+    .plvol span{font-size:10.5px;color:rgba(200,226,240,.7);width:34px;text-align:right;font-variant-numeric:tabular-nums}
+    .eqviz{display:flex;align-items:flex-end;gap:3px;height:26px;margin:2px 0 8px}
+    .eqviz i{width:6px;height:var(--h,9px);border-radius:2px;
+      background:linear-gradient(180deg,#a5e874,#3f7f22);opacity:.85;
+      animation:plEq .8s ease-in-out infinite alternate;animation-delay:var(--d,0s);animation-play-state:paused}
+    .wwpl[data-mode="playing"] .eqviz i{animation-play-state:running}
+    .sleepdisp{display:flex;align-items:center;justify-content:space-between;font-size:10.5px;
+      color:rgba(176,210,228,.6);margin-top:6px}
+    .sleepdisp b{font-weight:400;font-size:13px;color:#dff5c8;font-variant-numeric:tabular-nums;letter-spacing:.04em}
+    .sleepdisp b[data-fade="1"]{color:#ffb86b}
+    .plgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}
+    .plgrid .plchip{text-align:center;padding:7px 4px}
+    .plnote{font-size:10px;color:rgba(160,195,215,.5);line-height:1.5;margin:2px 0 0}
+    .plrescue{margin-top:8px}
+    @media (max-width:700px){
+      .wwpl{right:8px;left:auto;top:8px;width:212px;height:300px}
+      .wwpl.open{height:min(560px,calc(100vh - 24px))}
+      .wwpl-disc{width:112px;height:112px}
+      .wwpl.open .wwpl-disc{width:72px;height:72px}
+      .wwpl-name{font-size:14px}
+    }
+    @media (prefers-reduced-motion:reduce){
+      .wwpl-aura,.wwpl-disc,.wwpl-disc-ico,.wwpl-eqviz i,.eqviz i,.wwpl-track span,.wwpl-b.primary{animation:none}}
+
+    /* ===== 中间底部：实时语音内容翻译框（替代旧播放条的可见区域） ===== */
+    #wwTrans{position:relative;width:100%;box-sizing:border-box;border-radius:14px;
+      border:1px solid rgba(120,220,180,.20);
+      background:linear-gradient(180deg,rgba(8,18,28,.88),rgba(4,10,18,.93));
+      backdrop-filter:blur(18px) saturate(120%);-webkit-backdrop-filter:blur(18px) saturate(120%);
+      box-shadow:0 10px 34px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.06);
+      overflow:hidden;user-select:text;color:rgba(232,247,255,.9)}
+    #wwTrans.folded .trbody,#wwTrans.folded .trfoot,#wwTrans.folded .trnote{display:none}
+    .trhead{display:flex;align-items:center;gap:8px;padding:7px 10px;
+      border-bottom:1px solid rgba(255,255,255,.06);white-space:nowrap}
+    #wwTrans.folded .trhead{border-bottom:0}
+    .trdot{flex:none;width:8px;height:8px;border-radius:50%;background:#5b7183;
+      box-shadow:0 0 0 3px rgba(120,150,170,.10)}
+    #wwTrans[data-state="listening"] .trdot{background:#a5e874;
+      box-shadow:0 0 0 3px rgba(124,201,79,.16),0 0 12px rgba(124,201,79,.7);
+      animation:trPulse 1.4s ease-in-out infinite}
+    #wwTrans[data-state="translating"] .trdot{background:#8fc7e8;box-shadow:0 0 0 3px rgba(143,199,232,.18)}
+    #wwTrans[data-state="error"] .trdot{background:#ffb86b;box-shadow:0 0 0 3px rgba(255,184,107,.16)}
+    @keyframes trPulse{50%{opacity:.42}}
+    .trtitle{flex:none;font-size:11.5px;font-weight:600;letter-spacing:.04em;color:rgba(226,246,255,.92)}
+    .trstation{flex:none;max-width:148px;overflow:hidden;text-overflow:ellipsis;
+      font-size:10px;color:rgba(165,205,225,.55)}
+    .trstat{flex:none;font-size:10px;padding:2px 7px;border-radius:999px;
+      background:rgba(255,255,255,.05);color:rgba(190,220,238,.72)}
+    .trwave{flex:none;display:flex;align-items:center;gap:2px;height:14px;opacity:.4}
+    .trwave i{display:block;width:2px;height:var(--h,6px);border-radius:1px;background:#9ddc78}
+    #wwTrans[data-state="listening"] .trwave{opacity:1}
+    #wwTrans[data-state="listening"] .trwave i{animation:trEq .7s ease-in-out infinite alternate;animation-delay:var(--d,0s)}
+    @keyframes trEq{from{transform:scaleY(.4)}to{transform:scaleY(1.5)}}
+    .trgrow{flex:1;min-width:4px}
+    .trsel{display:flex;align-items:center;gap:4px;font-size:10px;color:rgba(170,205,225,.55)}
+    .trsel select,.trengsel{flex:none;font:10.5px/1 inherit;padding:4px 5px;border-radius:6px;
+      border:1px solid rgba(150,200,220,.22);background:rgba(9,20,30,.92);color:#dbf2ff;
+      outline:none;cursor:pointer;max-width:132px}
+    .trsel select:focus-visible,.trengsel:focus-visible,.trbtn:focus-visible,.trinput:focus-visible{outline:2px solid #8fc7e8;outline-offset:1px}
+    .trbtn{flex:none;padding:4px 9px;border-radius:8px;cursor:pointer;font:10.5px/1.2 inherit;
+      border:1px solid rgba(150,200,220,.22);background:rgba(255,255,255,.045);color:rgba(222,240,252,.82);
+      transition:background .15s,border-color .15s}
+    .trbtn:hover{background:rgba(90,160,200,.24);border-color:rgba(160,215,240,.42)}
+    .trbtn.primary{background:linear-gradient(160deg,rgba(165,232,116,.30),rgba(117,191,64,.16));
+      border-color:rgba(165,232,116,.5);color:#dcf5c2}
+    .trbtn.primary:hover{background:linear-gradient(160deg,rgba(165,232,116,.46),rgba(117,191,64,.26))}
+    .trbtn.mini{padding:4px 7px;font-size:12px;line-height:1}
+    .trbody{height:120px;overflow:auto;overscroll-behavior:contain;padding:8px 12px;
+      scrollbar-width:thin;scrollbar-color:rgba(140,190,215,.25) transparent}
+    .trempty{font-size:11px;line-height:1.7;color:rgba(170,205,225,.62)}
+    .trempty b{color:rgba(200,236,255,.88);font-weight:600}
+    .trline{padding:4px 0 5px;border-bottom:1px solid rgba(255,255,255,.045);
+      animation:trIn var(--dur-in) var(--ease-in) both}
+    .trline:last-child{border-bottom:0}
+    @keyframes trIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+    .trorig{font-size:10.5px;color:rgba(170,205,225,.62);line-height:1.5;word-break:break-word}
+    .trtrans{font-size:13.5px;line-height:1.5;color:#e9f8ff;margin-top:2px;word-break:break-word}
+    .trtrans.pending{color:rgba(160,195,215,.5);font-size:12px;font-style:italic}
+    .trtrans.fail{color:#ffb86b;font-size:12px}
+    .trmeta{font-size:9px;color:rgba(150,190,210,.42);margin-top:3px}
+    .trinterim{font-size:12px;color:rgba(185,220,240,.55);font-style:italic;padding:3px 0}
+    .trfoot{display:flex;align-items:center;gap:6px;padding:6px 10px;border-top:1px solid rgba(255,255,255,.06)}
+    .trinput{flex:1;min-width:0;padding:5px 8px;border-radius:7px;font:11px/1.3 inherit;
+      border:1px solid rgba(150,200,220,.18);background:rgba(255,255,255,.04);color:#eaf7ff;outline:none}
+    .trinput::placeholder{color:rgba(160,195,215,.45)}
+    .trengine{flex:0 1 auto;min-width:0;max-width:96px;overflow:hidden;text-overflow:ellipsis;
+      font-size:9.5px;color:rgba(160,195,215,.5);white-space:nowrap}
+    .trnote{padding:0 12px 8px;font-size:9.5px;line-height:1.5;color:rgba(150,190,210,.42)}
+    @media (max-width:700px){
+      .trhead{flex-wrap:wrap;white-space:normal}
+      .trstation,.trwave,.trnote{display:none}
+      .trbody{height:82px}
+      .trengine{display:none}
+    }
+    @media (prefers-reduced-motion:reduce){#wwTrans[data-state="listening"] .trdot,
+      #wwTrans[data-state="listening"] .trwave i,.trline{animation:none}}
+
   </style>
 </head>
 <body>
@@ -988,6 +1254,35 @@
       <button id="rStop" type="button" title="停止播放" aria-label="停止播放" disabled>■</button>
       <button id="rSearch" type="button" title="搜索电台或城市（/）" aria-label="搜索电台">⌕</button>
     </div>
+    <!-- 实时语音内容翻译框：可见区域已完全取代上面的旧播放条。
+         旧 #bar 仅保留为隐藏兼容节点（earth.js / panels.js 的 DOM 引用都带空值守卫，且 _iter7 自检会读取它）。 -->
+    <div id="wwTrans" data-state="idle" aria-label="实时语音内容翻译">
+      <div class="trhead">
+        <span class="trdot" aria-hidden="true"></span>
+        <span class="trtitle">实时语音翻译</span>
+        <span class="trstation" id="trStation">未选择电台</span>
+        <span class="trstat" id="trStat">待机</span>
+        <span class="trwave" aria-hidden="true">
+          <i style="--h:5px;--d:0s"></i><i style="--h:11px;--d:.12s"></i><i style="--h:7px;--d:.24s"></i>
+          <i style="--h:13px;--d:.36s"></i><i style="--h:6px;--d:.48s"></i><i style="--h:9px;--d:.6s"></i>
+        </span>
+        <span class="trgrow"></span>
+        <label class="trsel">译入<select id="trTarget" aria-label="翻译目标语言"></select></label>
+        <button class="trbtn primary" id="trStart" type="button">开始收音</button>
+        <button class="trbtn" id="trClear" type="button" title="清空字幕">清空</button>
+        <button class="trbtn mini" id="trFold" type="button" title="折叠 / 展开字幕框" aria-expanded="true">⌄</button>
+      </div>
+      <div class="trbody" id="trBody" role="log" aria-live="polite" aria-relevant="additions text"></div>
+      <div class="trfoot">
+        <input class="trinput" id="trInput" type="text" autocomplete="off"
+               placeholder="也可粘贴 / 输入一句外语，回车立即翻译" aria-label="手动输入待翻译文本">
+        <button class="trbtn" id="trSend" type="button">翻译</button>
+        <label class="trsel">音源<select id="trSource" aria-label="语音识别源语言"></select></label>
+        <select class="trengsel" id="trEngine" aria-label="翻译引擎"></select>
+        <span class="trengine" id="trEngineTag">引擎 —</span>
+      </div>
+      <div class="trnote">语音识别使用浏览器内置引擎（免费、无需密钥），拾取麦克风 / 系统声音；公开电台流受跨域限制，页面无法直接读取音频 PCM，因此不截断原始音频。文字翻译由免费公共 AI 接口完成，失败自动降级。</div>
+    </div>
     <div id="search" hidden>
       <input id="q" type="search" placeholder="搜索电台名称 / 城市 / 国家，回车定位并播放" autocomplete="off" aria-label="搜索电台">
       <div id="results"></div>
@@ -1003,6 +1298,10 @@
       <div class="pcrumb" id="lCrumb"></div>
       <button class="ico" id="lCollapse" type="button" title="收起左栏" aria-label="收起左栏">×</button>
     </div>
+    <div class="ptabs" id="lTabs" role="tablist" aria-label="视图切换">
+      <button class="ptab2 on" data-v="root" type="button" role="tab" aria-selected="true">目录</button>
+      <button class="ptab2" data-v="discover" type="button" role="tab" aria-selected="false">发现</button>
+    </div>
     <div class="lnow" id="lNow"></div>
     <button class="ldaily" id="lDaily" type="button" hidden></button>
     <div class="psearch">
@@ -1015,16 +1314,31 @@
   </aside>
   <button id="leftTab" class="ptab" type="button" aria-label="展开电台目录">电台目录</button>
 
-  <aside id="rightPanel" class="panel" aria-label="当前播放与功能设置">
-    <div class="phead">
-      <button class="ico" id="rBack" type="button" title="返回上一级" aria-label="返回上一级">‹</button>
-      <div class="pcrumb" id="rCrumb"></div>
-      <button class="ico" id="rCollapse" type="button" title="收起右栏" aria-label="收起右栏">×</button>
+  <!-- 右上角竖向一体化播放器：右栏卡片移除后，播放控制与全部功能收敛于此 -->
+  <div id="wwPlayer" class="wwpl" data-mode="idle" aria-label="WORLDWAVE 播放器">
+    <div class="wwpl-aura" aria-hidden="true"></div>
+    <div class="wwpl-main">
+      <button class="wwpl-disc" id="plDisc" type="button" aria-label="播放或暂停">
+        <span class="wwpl-disc-ring"></span><span class="wwpl-disc-core"></span>
+        <span class="wwpl-disc-ico" id="plDiscIco"></span>
+      </button>
+      <div class="wwpl-txt">
+        <div class="wwpl-name" id="plName">WORLDWAVE</div>
+        <div class="wwpl-sub"><span id="plState">待机</span><i></i><span id="plCity">点地球上的绿点开始收听</span></div>
+      </div>
+      <div class="wwpl-eqviz eqviz" id="plEq" aria-hidden="true">
+        <i></i><i></i><i></i><i></i><i></i>
+      </div>
+      <div class="wwpl-btns">
+        <button class="wwpl-b" id="plPrev" type="button" title="上一台" aria-label="上一台"></button>
+        <button class="wwpl-b primary" id="plPlay" type="button" title="播放 / 暂停" aria-label="播放或暂停"></button>
+        <button class="wwpl-b" id="plNext" type="button" title="随机换一台" aria-label="随机换一台"></button>
+        <button class="wwpl-b more" id="plMore" type="button" title="更多功能" aria-label="展开更多功能" aria-expanded="false">⌄</button>
+      </div>
     </div>
-    <div class="pbody" id="rBody" role="group" aria-label="正在播放与相关电台"></div>
-    <div class="pfoot" id="rFoot"><span>WORLDWAVE</span><span id="rState">就绪</span></div>
-  </aside>
-  <button id="rightTab" class="ptab" type="button" aria-label="展开放置与设置">播放 · 设置</button>
+    <div class="wwpl-track" aria-hidden="true"><span></span></div>
+    <div class="wwpl-panel" id="plPanel" hidden></div>
+  </div>
 
   <aside id="stDrawer" class="sdrawer" aria-label="电台详情" aria-hidden="true" hidden>
     <div class="sdhead">
@@ -1048,6 +1362,7 @@
 
   <script type="module" src="js/earth.js"></script>
   <script src="js/panels.js" defer></script>
+  <script src="js/translate.js" defer></script>
   <noscript><div class="ww-fallback">需要启用 JavaScript 才能显示 3D 地球。</div></noscript>
 </body>
 </html>

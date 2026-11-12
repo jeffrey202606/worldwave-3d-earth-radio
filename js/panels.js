@@ -127,7 +127,7 @@ const $ = id => document.getElementById(id);
  const MODE_TXT = { idle: '就绪', loading: '连接中', playing: '播放中', paused: '已暂停', error: '播放失败' };
  let stations = [], idx = null, current = null, mode = 'idle';
  let fav = load(KEY.fav, []), his = load(KEY.his, []), settings = load(KEY.set, {});
- const L = { stack: [{ v: 'root', title: '发现' }], limit: 48, filter: 'all', sort: load('ww.sort.v1', 'default') };
+ const L = { stack: [{ v: 'root', title: '目录' }], limit: 48, filter: 'all', sort: load('ww.sort.v1', 'default') };
  const R = { stack: [{ v: 'now', title: '播放' }] };
  /* WAVE DECK：列表密度视图 + 右栏折叠区块状态（视图偏好持久化） */
  const V = { view: load('ww.view.v1', 'card'), folds: { alt: true, near: true, resume: true, hot: true, tools: false } };
@@ -379,7 +379,7 @@ function preconnect(url) {
    入口：卡片抽屉的「详情」、长按操作单、以及从 URL 带 st= 参数进入。
    打开时左栏收起（<1600px）、地球飞向该台并把投影中心左移半个抽屉宽；
    抽屉打开期间点其它绿点只切换内容，不再叠加历史记录。 */
-const SD = { open: false, s: null };
+const SD = { open: false, s: null, pendingBack: false };
 let sdTimer = 0;
 const sdNode = id => document.getElementById(id);
 function renderStationDrawer(s) {
@@ -445,10 +445,38 @@ function renderStationDrawer(s) {
  });
  body.appendChild(tech);
 }
-function openStation(s) {
+/* ===== 抽屉历史状态机（豆包第 1 轮 D1）=====
+   S0=无抽屉 / S1=抽屉打开。
+   · S0 打开 → pushState，浏览器后退一次即关闭
+   · S1 内换台 → replaceState，不叠加历史（否则要后退很多次）
+   · 手动关闭（返回 / ESC / 遮罩）→ history.back()，由 popstate 真正收起
+   · 冷启动带 ?st= → 先 replaceState 一个「无抽屉基态」，再 pushState 抽屉态。
+     豆包原方案在冷启动时「不额外 pushState」，后退会直接离开网站而不是关抽屉，
+     这里补上基态条目修正该边界。 */
+function sdQuery(s) { return s.lat.toFixed(4) + ',' + s.lon.toFixed(4); }
+function sdUrl(s) {
+ const u = new URL(location.href);
+ u.searchParams.set('st', sdQuery(s));
+ return u.toString();
+}
+function sdBaseUrl() {
+ const u = new URL(location.href);
+ u.searchParams.delete('st');
+ return u.toString();
+}
+function findBySt(str) {
+ const p = String(str || '').split(',').map(Number);
+ if (!Number.isFinite(p[0]) || !Number.isFinite(p[1])) return null;
+ return stations
+  .filter(x => Math.abs(x.lat - p[0]) < 0.05 && Math.abs(x.lon - p[1]) < 0.05)
+  .sort((a, b) => (Math.abs(a.lat - p[0]) + Math.abs(a.lon - p[1]))
+    - (Math.abs(b.lat - p[0]) + Math.abs(b.lon - p[1])))[0] || null;
+}
+function openStation(s, opts) {
  if (!s) return;
  const host = sdNode('stDrawer');
  if (!host) return;
+ const fromHistory = !!(opts && opts.fromHistory);
  const first = !SD.open;
  SD.s = s;
  renderStationDrawer(s);
@@ -466,37 +494,58 @@ function openStation(s) {
  }
  const E = window.WW_EARTH;
  if (E) {
-  /* 规格写的是 2.2，但 minDistance 是 2.42，会贴到只看见一片卫星贴图；
-     3.4 既能把该台推到前景，又保留「这是一颗星球」的空间感 */
   E.flyTo(s.lat, s.lon, 4.4);
   E.setViewOffset && E.setViewOffset(window.innerWidth >= 1100 ? 260 : 0);
  }
- try {
-  const u = new URL(location.href);
-  u.searchParams.set('st', s.lat.toFixed(4) + ',' + s.lon.toFixed(4));
-  history.replaceState(null, '', u.toString());
- } catch (e) { /* file:// 下 replaceState 可能被拒 */ }
+ if (!fromHistory) {
+  try {
+   history[first ? 'pushState' : 'replaceState'](
+    { wwDrawer: true, st: sdQuery(s) }, '', sdUrl(s));
+  } catch (e) { /* file:// 下 history API 可能被拒 */ }
+ }
 }
-function closeStation() {
+function sdCloseNow() {
  const host = sdNode('stDrawer');
- if (!host || !SD.open) return;
+ if (!host) return;
  host.classList.remove('on');
  host.classList.add('out');
  host.setAttribute('aria-hidden', 'true');
  SD.open = false;
+ SD.pendingBack = false;
  document.body.classList.remove('sd-open');
  const E = window.WW_EARTH;
  if (E && E.setViewOffset) E.setViewOffset(0);
- try {
-  const u = new URL(location.href);
-  u.searchParams.delete('st');
-  history.replaceState(null, '', u.toString());
- } catch (e) { /* noop */ }
+ try { history.replaceState({ wwDrawer: false }, '', sdBaseUrl()); } catch (e) { /* noop */ }
  if (SD.leftWasOpen && window.innerWidth < 1600) setPanel('left', true, true);
  SD.leftWasOpen = false;
  clearTimeout(sdTimer);
- sdTimer = setTimeout(() => { if (!SD.open) { host.hidden = true; host.classList.remove('out'); } }, 280);
+ sdTimer = setTimeout(() => { if (!SD.open) { host.hidden = true; host.classList.remove('out'); } }, 200);
 }
+function closeStation(opts) {
+ if (!SD.open) return;
+ const fromHistory = !!(opts && opts.fromHistory);
+ if (!fromHistory) {
+  let hasState = false;
+  try { hasState = !!(history.state && history.state.wwDrawer); } catch (e) {}
+  if (hasState && !SD.pendingBack) {
+   SD.pendingBack = true;
+   try { history.back(); } catch (e) { SD.pendingBack = false; }
+   /* popstate 没来（file:// / 历史被外部改动）时兜底，避免卡在开着的抽屉 */
+   setTimeout(() => { if (SD.pendingBack && SD.open) sdCloseNow(); SD.pendingBack = false; }, 420);
+   return;
+  }
+ }
+ sdCloseNow();
+}
+window.addEventListener('popstate', e => {
+ SD.pendingBack = false;
+ const st = e && e.state && e.state.wwDrawer ? e.state.st : null;
+ if (st) {
+  const near = findBySt(st);
+  if (near) openStation(near, { fromHistory: true });
+  else sdCloseNow();
+ } else if (SD.open) sdCloseNow();
+});
 
 /* ---------- 触屏长按操作单 ---------- */
 let pressTimer = null, pressStart = null, sheetEl = null;
@@ -924,13 +973,32 @@ function play(s) {
    host.appendChild(b);
   });
  }
+/* 视图切换：目录 ⇄ 发现。Tab 常驻可见，避免「进去出不来」（豆包 A3） */
+function switchView(v) {
+ if (v === 'discover') {
+  if (document.body.dataset.left !== '1') setPanel('left', true, true);
+  L.stack = [{ v: 'root', title: '目录' }, { v: 'discover', title: '发现' }];
+ } else {
+  L.stack = [{ v: 'root', title: '目录' }];
+ }
+ L.limit = 48; renderL();
+ const b = $('lBody'); if (b) b.scrollTop = 0;
+}
+let lastViewKey = '';
 function renderL() {
   const top = L.stack[L.stack.length - 1], body = $('lBody');
   HL = (top.v === 'list' && top.query) ? String(top.query).trim().toLowerCase() : '';
   crumbs($('lCrumb'), L.stack, s => { L.stack = s; L.limit = 48; renderL(); });
   $('lBack').disabled = L.stack.length <= 1;
   mountFilters(top.v === 'root');
+  const isDisc = L.stack.some(x => x.v === 'discover');
   document.body.classList.toggle('view-discover', top.v === 'discover');
+  const tabs = $('lTabs');
+  if (tabs) [].forEach.call(tabs.querySelectorAll('.ptab2'), b => {
+   const on = b.dataset.v === (isDisc ? 'discover' : 'root');
+   b.classList.toggle('on', on);
+   b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
   renderNowStrip();
   body.innerHTML = '';
   /* 快照到位前 stations 只有 6 个预置点；此时显示骨架屏，避免统计条短暂出现错误数字 */
@@ -942,6 +1010,12 @@ function renderL() {
    case 'list': renderStationList(f, top); break;
   }
   body.appendChild(f);
+  /* 视图切换才播 16px 淡入，筛选/播放等重绘不重复动效（豆包 A3） */
+  const vk = L.stack.some(x => x.v === 'discover') ? 'discover' : 'root';
+  if (vk !== lastViewKey) {
+   lastViewKey = vk;
+   body.classList.remove('viewin'); void body.offsetWidth; body.classList.add('viewin');
+  }
   syncDrawers();
   scheduleProbe();
   $('lCount').textContent = fmt(stations.length) + ' 个点位';
@@ -1043,7 +1117,7 @@ function discHead(t, n) {
  return h;
 }
 function cityView(name) {
- const items = stations.filter(x => String(x.city || '').split(',')[0].trim() === name);
+ const items = openList(stations.filter(x => String(x.city || '').split(',')[0].trim() === name));
  if (!items.length) return;
  L.stack.push({ v: 'list', title: name, items });
  L.limit = 48; renderL();
@@ -1053,10 +1127,11 @@ function cityView(name) {
 }
 function renderDiscover(f) {
  const wrap = el('div', 'discwrap');
- /* ① 编辑精选 */
+ /* ① 编辑精选：横向卡片流 + 左右箭头（豆包 D2：桌面端不能只靠 shift+滚轮） */
  const cur = curatedList();
  if (cur.length) {
   wrap.appendChild(discHead('编辑精选', cur.length));
+  const box = el('div', 'dswrap');
   const cards = el('div', 'dscards');
   cur.forEach(c => {
    const b = el('button', 'dscard');
@@ -1065,12 +1140,20 @@ function renderDiscover(f) {
    b.appendChild(el('div', 'd', c.d));
    b.appendChild(el('div', 'c', c.items.length + ' 个电台'));
    b.addEventListener('click', () => {
-    L.stack.push({ v: 'list', title: c.t, items: c.items });
+    L.stack.push({ v: 'list', title: c.t, items: openOnly ? c.items.filter(isOpenNow) : c.items });
     L.limit = 48; renderL();
    });
    cards.appendChild(b);
   });
-  wrap.appendChild(cards);
+  const prev = el('button', 'dsnav prev', '‹');
+  const next = el('button', 'dsnav next', '›');
+  prev.type = next.type = 'button';
+  prev.setAttribute('aria-label', '向左滚动主题卡');
+  next.setAttribute('aria-label', '向右滚动主题卡');
+  box.appendChild(prev); box.appendChild(cards); box.appendChild(next);
+  wrap.appendChild(box);
+  /* 片段还没进 DOM，scrollWidth 要等一帧才有效；低帧率环境下 rAF 不可靠，用 setTimeout */
+  setTimeout(() => initDsNav(box), 0);
  }
  /* ② 小地方的声音 */
  const small = smallCities();
@@ -1116,7 +1199,42 @@ function renderDiscover(f) {
    wrap.appendChild(box);
   });
  }
+ /* 返回目录：发现页是视图栈节点，必须给一个常驻锚点（豆包 A3） */
+ const home = el('button', 'dsback', '‹ 返回目录');
+ home.type = 'button';
+ home.addEventListener('click', () => switchView('root'));
+ wrap.appendChild(home);
  f.appendChild(wrap);
+}
+/* 横向卡片流导航：仅当内容溢出时出现；边界态禁用；单次 186px = 170 卡宽 + 16 间距 */
+function initDsNav(box) {
+ const cards = box.querySelector('.dscards');
+ const prev = box.querySelector('.dsnav.prev');
+ const next = box.querySelector('.dsnav.next');
+ if (!cards || !prev || !next) return;
+ /* scroll-snap + 左侧 10px padding 会让初始 scrollLeft 不是 0，边界要按实测基准判 */
+ const minLeft = cards.scrollLeft;
+ const upd = () => {
+  const can = cards.scrollWidth > cards.clientWidth + 4;
+  box.classList.toggle('cannav', can);
+  prev.disabled = !can || cards.scrollLeft <= minLeft + 2;
+  next.disabled = !can || cards.scrollLeft + cards.clientWidth >= cards.scrollWidth - 2;
+ };
+ const glide = d => {
+  const from = cards.scrollLeft, t0 = performance.now();
+  const step = t => {
+   const p = Math.min(1, (t - t0) / 200);
+   cards.scrollLeft = from + d * (1 - Math.pow(1 - p, 3)); /* ease-out */
+   if (p < 1) requestAnimationFrame(step);
+   else upd();
+  };
+  requestAnimationFrame(step);
+ };
+ prev.addEventListener('click', () => glide(-186));
+ next.addEventListener('click', () => glide(186));
+ cards.addEventListener('scroll', upd, { passive: true });
+ box._dsUpd = upd;
+ upd();
 }
 
 /* 根视图：分类标签（单步筛选）+ 扁平电台列表，去掉多层钻取。 */
@@ -1140,18 +1258,29 @@ function catOf(name) {
   for (let i = 0; i < CATS.length; i++) if (CATS[i][1].test(n)) out.push(CATS[i][0]);
   return out;
 }
+/* ===== 时区营业过滤（豆包 C1）=====
+   纯前端没有 IANA 时区库，用「经度 / 15」估算 UTC 偏移（±30 分钟误差，不影响判断）。
+   当地 0:00–6:00 是停播 / 循环广告高发时段，开启后从列表、随机播放和绿点中屏蔽。 */
+let openOnly = false;
+function localHour(s) {
+ const off = Math.round((Number(s.lon) || 0) / 15);
+ return (((new Date().getUTCHours() + off) % 24) + 24) % 24;
+}
+function isOpenNow(s) { return localHour(s) >= 6; }
+function openList(arr) { return openOnly ? arr.filter(isOpenNow) : arr; }
 function filterStations(filter) {
-  if (filter.indexOf('g:') === 0) {
-   const cat = filter.slice(2);
-   return stations.filter(s => catOf(s.name).indexOf(cat) >= 0);
-  }
-  if (filter === 'all') return stations;
-  if (filter === 'cn') return stations.filter(s => s.cn);
-  if (filter === 'hot') return stations.filter(s => s.alts && s.alts.length)
-    .sort((a, b) => b.alts.length - a.alts.length).slice(0, 300);
-  if (filter === 'fav') return fav;
-  if (filter === 'recent') return his;
-  return stations.filter(s => continentOf(countryOf(s), s.lat, s.lon) === filter);
+ let out;
+ if (filter.indexOf('g:') === 0) {
+  const cat = filter.slice(2);
+  out = stations.filter(s => catOf(s.name).indexOf(cat) >= 0);
+ } else if (filter === 'all') out = stations;
+ else if (filter === 'cn') out = stations.filter(s => s.cn);
+ else if (filter === 'hot') out = stations.filter(s => s.alts && s.alts.length)
+   .sort((a, b) => b.alts.length - a.alts.length).slice(0, 300);
+ else if (filter === 'fav') out = fav;
+ else if (filter === 'recent') out = his;
+ else out = stations.filter(s => continentOf(countryOf(s), s.lat, s.lon) === filter);
+ return openList(out);
 }
 function labelOf(filter) {
   if (filter.indexOf('g:') === 0) return filter.slice(2) + '电台';
@@ -1160,17 +1289,38 @@ function labelOf(filter) {
 }
 const CAT_CHIPS = [['g:音乐', '音乐'], ['g:新闻', '新闻'], ['g:谈话', '谈话'],
   ['g:体育', '体育'], ['g:爵士', '爵士'], ['g:古典', '古典']];
+let chipsExpanded = false;
+const MORE_KEYS = CHIPS.slice(6).map(x => x[0]).concat(CAT_CHIPS.map(x => x[0]));
 function chipRow() {
   const wrap = el('div', 'chips');
-  CHIPS.forEach(([key, label]) => {
-   const b = el('button', 'chip' + (L.filter === key ? ' on' : ''), label);
+  const mk = (key, label, cls) => {
+   const b = el('button', cls + (L.filter === key ? ' on' : ''), label);
    b.type = 'button';
    b.dataset.k = key;
    b.setAttribute('aria-pressed', L.filter === key ? 'true' : 'false');
    b.addEventListener('click', () => setFilter(key));
-   wrap.appendChild(b);
+   return b;
+  };
+  /* 首屏只露 6 个地区 chip，其余 11 个收进「+11」（豆包 A1） */
+  CHIPS.slice(0, 6).forEach(([k, l]) => wrap.appendChild(mk(k, l, 'chip')));
+  /* 仅营业中：独立开关，不占用 L.filter，始终可见（豆包 C1） */
+  const blocked = openOnly ? stations.filter(s => !isOpenNow(s)).length : 0;
+  const ob = el('button', 'chip openchip' + (openOnly ? ' on' : ''),
+   '仅营业中' + (openOnly ? ' · 屏蔽 ' + fmt(blocked) + ' 台' : ''));
+  ob.type = 'button';
+  ob.dataset.k = 'open';
+  ob.setAttribute('aria-pressed', openOnly ? 'true' : 'false');
+  ob.addEventListener('click', () => {
+   openOnly = !openOnly;
+   const E = window.WW_EARTH;
+   if (E && E.setOpenOnly) E.setOpenOnly(openOnly ? isOpenNow : null);
+   mountFilters(true);
+   renderL(); renderNowStrip();
+   toast(openOnly ? '已屏蔽当地凌晨电台 · ' + fmt(blocked) + ' 台' : '已显示全部电台');
   });
-  /* 第二组：类型。占满一整行，避免和地区标签混在一起读不出层级 */
+  wrap.appendChild(ob);
+  const more = el('div', 'chipmore');
+  CHIPS.slice(6).forEach(([k, l]) => more.appendChild(mk(k, l, 'chip')));
   const div = el('div', 'chipdiv');
   div.appendChild(el('span', 'chiplabel', '类型'));
   CAT_CHIPS.forEach(([key, label]) => {
@@ -1181,7 +1331,17 @@ function chipRow() {
    b.addEventListener('click', () => setFilter(L.filter === key ? 'all' : key));
    div.appendChild(b);
   });
-  wrap.appendChild(div);
+  more.appendChild(div);
+  wrap.appendChild(more);
+  /* 当前筛选落在被折叠的 chip 上时自动展开，否则用户看不到自己选了什么 */
+  if (MORE_KEYS.indexOf(L.filter) >= 0) chipsExpanded = true;
+  const btn = el('button', 'chipmore-btn', chipsExpanded ? '收起' : '+' + MORE_KEYS.length);
+  btn.type = 'button';
+  btn.setAttribute('aria-expanded', chipsExpanded ? 'true' : 'false');
+  btn.setAttribute('aria-label', chipsExpanded ? '收起更多分类' : '展开更多分类');
+  btn.addEventListener('click', () => { chipsExpanded = !chipsExpanded; mountFilters(true); });
+  wrap.appendChild(btn);
+  if (!chipsExpanded) more.hidden = true;
   return wrap;
 }
 /* 分类标签挂在滚动区之外（#lFilter），列表下拉时保持固定；点击大洲标签同时把地球转到该大洲 */
@@ -1198,9 +1358,10 @@ function setFilter(key) {
   /* 先让地球起飞，再重建列表：120 张卡片的 DOM 构建会占住主线程，
      放在 flyTo 之前就是「点了标签，1-2 秒后地球才动」的原因。 */
   const v = CHIP_VIEW[key], E = window.WW_EARTH;
-  if (v && E && E.flyTo) E.flyTo(v[0], v[1], v[2], { dur: 1350 });
+  if (v && E && E.flyTo) E.flyTo(v[0], v[1], v[2], { dur: 900 });
   const host = $('lFilter');
   if (host) [].forEach.call(host.querySelectorAll('.chip'), c => {
+   if (c.dataset.k === 'open') return; /* 营业开关不是筛选态，别被清掉 */
    const on = c.dataset.k === key;
    c.classList.toggle('on', on);
    c.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -1433,7 +1594,7 @@ function renderDaily() {
   host.onclick = () => {
     const E = window.WW_EARTH;
     if (E) E.flyTo(p.lat, p.lon, 2.95);
-    L.stack = [{ v: 'root', title: '发现' }, { v: 'list', title: p.name, items: p.items.slice() }];
+    L.stack = [{ v: 'root', title: '目录' }, { v: 'list', title: p.name, items: p.items.slice() }];
     L.limit = 48; renderL();
     if (document.body.dataset.left !== '1') setPanel('left', true, true);
     toast('今日坐标 · ' + p.name + ' · ' + p.count + ' 个电台');
@@ -1500,8 +1661,9 @@ function renderRoot(f) {
   renderStationRows(f, items, null, 'l');
 }
 function randomPlay() {
-  if (!stations.length) return;
-  play(stations[Math.floor(Math.random() * stations.length)]);
+  const pool = openList(stations);
+  if (!pool.length) return;
+  play(pool[Math.floor(Math.random() * pool.length)]);
 }
 /* 中国电台：按 国家级 / 省级 / 市级 / 网络电台 四级直接平铺，层级标题内联，不额外钻取 */
 function renderChina(f, items) {
@@ -1529,13 +1691,13 @@ function renderChina(f, items) {
   }
 }
 function renderStationList(f, top, side) {
-  const items = top.items || [];
+  const items = openList(top.items || []);
   const q = (top.query || '').trim().toLowerCase();
   const list = q ? rankList(items.filter(s => (s.name + ' ' + s.city).toLowerCase().indexOf(q) >= 0), q) : items;
   f.appendChild(sec(top.title + ' · ' + fmt(list.length) + ' 个电台'));
   if (!list.length) {
    f.appendChild(empty(q ? '没有匹配的电台\n换一个关键词，或试试城市名 / 国家名' : '这里还没有电台\n在地球上点一个绿点，即可开始收听', 'search', [
-    { label: '看热门电台', fn: () => { L.stack = [{ v: 'root', title: '发现' }]; setFilter('hot'); } }
+    { label: '看热门电台', fn: () => { L.stack = [{ v: 'root', title: '目录' }]; setFilter('hot'); } }
    ]));
    return;
   }
@@ -1561,28 +1723,180 @@ function renderStationRows(f, list, title, side) {
   more(f, list.length, shown);
 }
 
- /* ---------- 右侧播放 / 功能 ---------- */
- function renderR() {
-  const top = R.stack[R.stack.length - 1], body = $('rBody');
-  crumbs($('rCrumb'), R.stack, s => { R.stack = s; renderR(); });
-  $('rBack').disabled = R.stack.length <= 1;
-  body.innerHTML = '';
-  const f = document.createDocumentFragment();
-  switch (top.v) {
-   case 'now': renderNow(f); break;
-   case 'list': renderStationList(f, top, 'r'); break;
-   case 'settings': renderSettings(f); break;
-   case 'about': renderAbout(f); break;
-  }
-  body.appendChild(f);
-  eqVizUpdate();
-  const st = $('rState');
-  st.dataset.mode = mode;
-  st.textContent = MODE_TXT[mode] || '就绪';
-  /* 右栏整体也带上播放态，供 EQ 透明度等纯 CSS 表现使用 */
-  const rp = $('rightPanel');
-  if (rp) rp.dataset.mode = mode;
+ /* ===== 左上角一体化播放器 =====
+    右栏卡片全部移除后，这里是唯一的播放入口：主条负责播放态，展开面板集成
+    音量 / EQ / 睡眠定时 / 收藏 / 详情 / 分享 / 发现 / 今日坐标 / 影院 /
+    显示设置 / 失败兜底 等功能。所有状态仍由 ww:mode、ww:select、ww:stop 驱动。 */
+let plExpanded = false;
+function plChip(label, on, fn, ico) {
+ const b = el('button', 'plchip' + (on ? ' on' : ''));
+ b.type = 'button';
+ if (ico) { const s = el('span'); s.innerHTML = ICON[ico] || ''; if (s.firstChild) b.appendChild(s.firstChild); }
+ b.appendChild(document.createTextNode(label));
+ b.addEventListener('click', fn);
+ return b;
+}
+function plRow(title, right) {
+ const r = el('div', 'plrow');
+ const t = el('div', 'plrow-t');
+ t.appendChild(el('span', '', title));
+ if (right != null) t.appendChild(el('b', '', right));
+ r.appendChild(t);
+ return r;
+}
+function renderPlayer() {
+ const host = $('wwPlayer');
+ if (!host) return;
+ const E = window.WW_EARTH;
+ const playing = mode === 'playing';
+ host.dataset.mode = current ? mode : 'idle';
+ host.classList.toggle('open', plExpanded);
+ $('plName').textContent = current ? (current.name || 'WORLDWAVE') : 'WORLDWAVE';
+ $('plName').title = current ? (current.name || '') : '';
+ $('plState').textContent = current ? (MODE_TXT[mode] || '已选择') : '待机';
+ $('plCity').textContent = current
+  ? (cityShort(current) || hostOf(current) || '全球电台')
+  : '点地球上的绿点开始收听';
+ fillIco($('plPlay'), playing ? 'pause' : 'play');
+ fillIco($('plDiscIco'), playing ? 'pause' : 'play');
+ $('plMore').setAttribute('aria-expanded', plExpanded ? 'true' : 'false');
+ const panel = $('plPanel');
+ panel.hidden = !plExpanded;
+ eqVizUpdate();
+ if (!plExpanded) { panel.innerHTML = ''; return; }
+ panel.innerHTML = '';
+
+ /* 1. 音量 */
+ const vrow = plRow('音量');
+ const vw = el('div', 'plvol');
+ const vol = el('input');
+ vol.type = 'range'; vol.min = '0'; vol.max = '1'; vol.step = '0.05';
+ vol.setAttribute('aria-label', '音量');
+ vol.value = String(E && E.audio ? E.audio.volume : 0.8);
+ const vpct = el('span', '', Math.round(parseFloat(vol.value) * 100) + '%');
+ vol.addEventListener('input', () => {
+  sleepStopFade();
+  if (E && E.audio) E.audio.volume = parseFloat(vol.value);
+  vpct.textContent = Math.round(parseFloat(vol.value) * 100) + '%';
+  try { localStorage.setItem('ww.volume.v2', vol.value); } catch (e) { /* noop */ }
+  const sdV = $('sdVol'); if (sdV) sdV.value = vol.value;
+ });
+ vw.appendChild(vol); vw.appendChild(vpct); vrow.appendChild(vw); panel.appendChild(vrow);
+
+ /* 2. 音效 EQ（复用原有预设与视觉律动） */
+ const eqrow = plRow('音效', (EQ_PRESETS[EQ.preset] || {}).name || 'EQ');
+ const viz = el('div', 'eqviz');
+ for (let i = 0; i < 9; i++) viz.appendChild(el('i'));
+ eqrow.appendChild(viz);
+ const eqc = el('div', 'plchips');
+ Object.keys(EQ_PRESETS).forEach(k => eqc.appendChild(plChip(EQ_PRESETS[k].name, EQ.preset === k, () => {
+  EQ.preset = k; EQ.g = EQ_PRESETS[k].g.slice(); saveEQ(); eqApply();
+  renderPlayer(); toast('EQ 预设 · ' + EQ_PRESETS[k].name);
+ })));
+ eqc.appendChild(plChip(EQ.real ? '真实 EQ ✓' : '真实 EQ', !!EQ.real, () => {
+  eqEnableReal(!EQ.real); renderPlayer();
+ }));
+ eqrow.appendChild(eqc); panel.appendChild(eqrow);
+
+ /* 3. 睡眠定时（含最后 60s 渐弱与倒计时） */
+ const srow = plRow('睡眠定时', SLEEP.deadline ? '运行中' : '关');
+ const sc = el('div', 'plchips');
+ sc.appendChild(plChip('关', !SLEEP.deadline, () => { if (SLEEP.deadline) cancelSleep(); }));
+ [15, 30, 60].forEach(m => sc.appendChild(plChip(m + ' 分', !!(SLEEP.deadline && SLEEP.leftMin === m), () => startSleep(m))));
+ srow.appendChild(sc);
+ const disp = el('div', 'sleepdisp');
+ disp.appendChild(el('span', '', SLEEP.deadline ? '剩余时间' : '到点渐弱停止'));
+ const remain = SLEEP.deadline ? Math.max(0, SLEEP.deadline - Date.now()) : 0;
+ const rb = el('b', '', SLEEP.deadline ? fmtSleep(remain) : '--:--');
+ if (remain && remain <= SLEEP_FADE_MS) rb.dataset.fade = '1';
+ disp.appendChild(rb); srow.appendChild(disp); panel.appendChild(srow);
+
+ /* 4. 快捷操作 */
+ const arow = plRow('快捷操作');
+ const grid = el('div', 'plgrid');
+ const acts = [
+  ['收藏', current ? (isFav(current) ? 'starOn' : 'star') : 'star', () => {
+   if (!current) return toast('先选一台电台');
+   if (isFav(current)) { fav = fav.filter(x => !same(x, current)); toast('已取消收藏'); }
+   else { fav = [compact(current), ...fav].slice(0, 200); toast('已收藏 · ' + current.name); }
+   save(KEY.fav, fav); syncFav(current); syncCounts(); renderL(); renderPlayer();
+  }],
+  ['详情', 'panel', () => current ? openStation(current) : toast('先选一台电台')],
+  ['分享', 'link', () => {
+   if (!current) return toast('先选一台电台');
+   const url = location.href.split('#')[0].split('?')[0] + '?st=' + current.lat.toFixed(4) + ',' + current.lon.toFixed(4);
+   if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => toast('链接已复制')).catch(() => toast(url));
+   else toast(url);
+  }],
+  ['发现', 'grid', () => switchView('discover')],
+  ['今日坐标', 'loc', () => { const d = $('lDaily'); if (d && !d.hidden) d.click(); else toast('今日坐标准备中'); }],
+  ['影院模式', 'info', () => { setPanel('left', document.body.dataset.left !== '1', true); toast('影院模式'); }],
+  ['随机一台', 'dice', () => randomPlay()],
+  ['快捷键', 'list', () => helpOverlay()],
+  ['恢复默认', 'gear', () => { settings = {}; save(KEY.set, settings); applySettings(); renderPlayer(); toast('已恢复默认设置'); }]
+ ];
+ acts.forEach(([label, ico, fn]) => grid.appendChild(plChip(label, false, fn, ico)));
+ arow.appendChild(grid); panel.appendChild(arow);
+
+ /* 5. 显示与画质 */
+ const drow = plRow('显示');
+ const dc = el('div', 'plchips');
+ [['自动', 'auto'], ['高清', 'high'], ['省电', 'eco']].forEach(([n, v]) =>
+  dc.appendChild(plChip(n, (settings.quality || 'auto') === v, () => {
+   settings.quality = v; save(KEY.set, settings); E.setQualityMode(v); renderPlayer();
+  })));
+ const toggle = (label, on, fn) => dc.appendChild(plChip(label + (on ? ' 开' : ' 关'), on, fn));
+ toggle('旋转', settings.rotate !== false, () => {
+  settings.rotate = !(settings.rotate !== false); save(KEY.set, settings);
+  E.setAutoRotate(settings.rotate); renderPlayer();
+ });
+ toggle('地名', settings.labels !== false, () => {
+  settings.labels = !(settings.labels !== false); save(KEY.set, settings);
+  E.setLabelsVisible(settings.labels); renderPlayer();
+ });
+ toggle('绿点', settings.points !== false, () => {
+  settings.points = !(settings.points !== false); save(KEY.set, settings);
+  E.setPointsVisible(settings.points); renderPlayer();
+ });
+ drow.appendChild(dc); panel.appendChild(drow);
+
+ /* 6. 运行状态 */
+ const irow = plRow('运行状态');
+ const info = E && E.info ? E.info : null;
+ const note = el('div', 'plnote', info
+  ? fmt(info.count) + ' 个点位 · 采样 ' + info.quality + ' · ' + info.qualityMode +
+    ' · 绘制 ' + fmt(info.render.calls) + ' 次'
+  : '电台目录加载中…');
+ irow.appendChild(note); panel.appendChild(irow);
+
+ /* 7. 播放失败兜底：三条替代电台 */
+ if (mode === 'error') {
+  const rb2 = rescueBlock();
+  if (rb2) { rb2.classList.add('plrescue'); panel.appendChild(rb2); }
  }
+ eqVizUpdate(panel);
+}
+function bindPlayer() {
+ fillIco($('plPrev'), 'his');
+ fillIco($('plNext'), 'dice');
+ const toggle = () => {
+  const E = window.WW_EARTH;
+  if (!current) { randomPlay(); return; }
+  if (E && E.togglePlay) E.togglePlay();
+ };
+ const d = $('plDisc'); if (d) d.addEventListener('click', toggle);
+ const p = $('plPlay'); if (p) p.addEventListener('click', toggle);
+ const pv = $('plPrev');
+ if (pv) pv.addEventListener('click', () => {
+  const prev = his && his[1];
+  if (prev) play(prev); else toast('还没有上一台');
+ });
+ const nx = $('plNext'); if (nx) nx.addEventListener('click', () => randomPlay());
+ const mo = $('plMore');
+ if (mo) mo.addEventListener('click', () => { plExpanded = !plExpanded; renderPlayer(); });
+}
+/* ---------- 右侧播放 / 功能（右栏已移除，保留调用点但重定向到播放器） ---------- */
+ function renderR() { renderPlayer(); }
  function helpOverlay() {
   const old = $('wdHelp');
   if (old) { old.remove(); return; }
@@ -2192,11 +2506,17 @@ function renderFeatures(f) {
 
  /* ---------- 折叠 / 事件 ---------- */
  function setPanel(side, open, persist) {
-  document.body.dataset[side] = open ? '1' : '0';
-  const panel = $(side === 'left' ? 'leftPanel' : 'rightPanel');
+  /* 右栏已移除：永远把 --rw 归零，避免底部 HUD 被一个不存在的面板挤窄 */
+  if (side === 'right') {
+   document.body.dataset.right = '0';
+   document.documentElement.style.setProperty('--rw', '0px');
+   return;
+  }
+  document.body.dataset.left = open ? '1' : '0';
+  const panel = $('leftPanel');
   const w = panel ? panel.offsetWidth : 288;
-  document.documentElement.style.setProperty(side === 'left' ? '--lw' : '--rw', open ? w + 'px' : '0px');
-  if (persist) save(side === 'left' ? KEY.left : KEY.right, open ? '1' : '0');
+  document.documentElement.style.setProperty('--lw', open ? w + 'px' : '0px');
+  if (persist) save(KEY.left, open ? '1' : '0');
  }
  function applySettings() {
   const E = window.WW_EARTH;
@@ -2245,13 +2565,9 @@ function renderFeatures(f) {
  }
  function bind() {
   $('lBack').addEventListener('click', () => { if (L.stack.length > 1) { L.stack.pop(); L.limit = 48; renderL(); } });
-  $('rBack').addEventListener('click', () => { if (R.stack.length > 1) { R.stack.pop(); renderR(); } });
   $('lCollapse').addEventListener('click', () => setPanel('left', false, true));
-  $('rCollapse').addEventListener('click', () => setPanel('right', false, true));
   $('leftTab').addEventListener('click', () => setPanel('left', true, true));
-  $('rightTab').addEventListener('click', () => setPanel('right', true, true));
   bindArrowNav('lBody');
-  bindArrowNav('rBody');
   let searchTimer = null, lastSearchFly = '', searchFlyAt = 0;
   $('lSearch').addEventListener('input', e => {
    clearTimeout(searchTimer);
@@ -2267,7 +2583,7 @@ function renderFeatures(f) {
     }
     const needle = q.toLowerCase();
     const items = rankList(stations.filter(s => (s.name + ' ' + s.city).toLowerCase().indexOf(needle) >= 0), needle).slice(0, 400);
-    L.stack = [{ v: 'root', title: '发现' }, { v: 'list', title: '搜索', query: q, items }];
+    L.stack = [{ v: 'root', title: '目录' }, { v: 'list', title: '搜索', query: q, items }];
     L.limit = 60; renderL();
     /* 搜索与地球联动：命中的点保持亮度、其余压到 0.15，并飞向首个结果。
        同一个目标不重复起飞，避免每敲一个字地球都抖一下。 */
@@ -2293,15 +2609,12 @@ function renderFeatures(f) {
     renderL(); e.target.blur();
    }
   });
-  /* 发现入口：搜索框右侧 ✦ */
+  /* 常驻 Tab（目录 / 发现）+ 搜索框右侧 ✦ 作为同一个入口 */
+  const tabs = $('lTabs');
+  if (tabs) [].forEach.call(tabs.querySelectorAll('.ptab2'), b =>
+   b.addEventListener('click', () => switchView(b.dataset.v)));
   const discBtn = $('lDiscover');
-  if (discBtn) discBtn.addEventListener('click', () => {
-   if (L.stack[L.stack.length - 1].v === 'discover') return;
-   if (document.body.dataset.left !== '1') setPanel('left', true, true);
-   L.stack = [{ v: 'root', title: '目录' }, { v: 'discover', title: '发现' }];
-   L.limit = 48; renderL();
-   const b = $('lBody'); if (b) b.scrollTop = 0;
-  });
+  if (discBtn) discBtn.addEventListener('click', () => switchView('discover'));
 
   /* 详情抽屉：返回 / 收藏 / 分享 / 播放 / 音量 */
   const sdBack = sdNode('sdBack');
@@ -2343,8 +2656,8 @@ function renderFeatures(f) {
   });
   window.addEventListener('ww:select', e => {
    current = e.detail.station;
-   /* 抽屉开着时，点地球上的其它绿点只切换内容，不关闭 */
-   if (SD.open && SD.s && !same(SD.s, current)) renderStationDrawer(current);
+   /* 抽屉开着时点其它绿点：切换内容 + replaceState 同步 URL，不叠加历史 */
+   if (SD.open && SD.s && !same(SD.s, current)) openStation(current);
    his = [compact(current), ...his.filter(x => !same(x, current))].slice(0, 40);
    save(KEY.his, his);
    syncCounts();
@@ -2378,6 +2691,7 @@ function renderFeatures(f) {
    }
    syncHeroMode();
    renderNowStrip();
+   renderPlayer();
    if (SD.open && SD.s) renderStationDrawer(SD.s);
    /* 失败态要重建右栏才能插入「试一试」推荐，其它状态只更新状态条即可 */
    if (mode === 'error') renderR();
@@ -2385,17 +2699,23 @@ function renderFeatures(f) {
   window.addEventListener('ww:catalog', () => {
    stations = window.WW_EARTH.stations;
    rebuildIndex(); renderL(); renderR(); renderDaily();
+   /* 目录重建后点云是全新的，营业掩码要重放一次（同搜索掩码的坑） */
+   if (openOnly && window.WW_EARTH.setOpenOnly) window.WW_EARTH.setOpenOnly(isOpenNow);
    /* 深链：?st=lat,lon 直接打开对应电台的详情（分享出去的链接） */
    if (!deepLinked) {
     deepLinked = true;
     try {
      const st = new URL(location.href).searchParams.get('st');
      if (st) {
-      const p2 = st.split(',').map(Number);
-      const near = stations
-       .filter(x => Math.abs(x.lat - p2[0]) < 0.05 && Math.abs(x.lon - p2[1]) < 0.05)
-       .sort((a, b) => (Math.abs(a.lat - p2[0]) + Math.abs(a.lon - p2[1])) - (Math.abs(b.lat - p2[0]) + Math.abs(b.lon - p2[1])))[0];
-      if (near) setTimeout(() => openStation(near), 60);
+      const near = findBySt(st);
+      if (near) {
+       /* 冷启动修正：先造一个无抽屉基态条目，再压入抽屉态，后退才会「留在站内并关闭」 */
+       try {
+        history.replaceState({ wwDrawer: false }, '', sdBaseUrl());
+        history.pushState({ wwDrawer: true, st: sdQuery(near) }, '', sdUrl(near));
+       } catch (e) { /* noop */ }
+       setTimeout(() => openStation(near, { fromHistory: true }), 60);
+      }
      }
     } catch (e) { /* noop */ }
    }
@@ -2404,6 +2724,8 @@ function renderFeatures(f) {
   window.addEventListener('resize', () => {
    setPanel('left', document.body.dataset.left === '1', false);
    setPanel('right', document.body.dataset.right === '1', false);
+   const dsw = document.querySelector('.dswrap');
+   if (dsw && dsw._dsUpd) dsw._dsUpd();
   });
   /* F：影院模式，一键收起 / 恢复两侧面板 */
   window.addEventListener('keydown', e => {
@@ -2496,7 +2818,7 @@ function renderFeatures(f) {
   const lv = localStorage.getItem(KEY.left), rv = localStorage.getItem(KEY.right);
   setPanel('left', lv === null ? !narrow : lv === '1', false);
   setPanel('right', rv === null ? !narrow : rv === '1', false);
-  bind(); renderL(); renderR(); renderDaily();
+  bind(); bindPlayer(); renderL(); renderR(); renderDaily();
   const rvEl = $('rVol');
   if (rvEl) rvEl.addEventListener('input', sleepStopFade);
   firstRunHint();
